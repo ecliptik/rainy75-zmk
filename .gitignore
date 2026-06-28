@@ -4,7 +4,7 @@ build-mcuboot/
 
 # West workspace (fetched by west update)
 zmk-src/
-zephyr/
+/zephyr/
 modules/
 bootloader/
 .west/

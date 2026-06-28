@@ -1,5 +1,6 @@
 config BOARD_RAINY75
 	select SOC_TLSR9518
+	select HAS_POWEROFF
 
 config RAINY75_ANSI
 	bool "ANSI physical layout (UNTESTED)"
