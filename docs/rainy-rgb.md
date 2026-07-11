@@ -17,7 +17,7 @@ Hardware-verified end to end on the physical keyboard (USB + BLE, mcuboot DFU).
 | `engine.{h,c}` | Owns `pixels[83]` + a dedicated **50 FPS render thread**; runtime state; the FPS-independent speed model; settings load; dispatch (effect → overlay → strip). |
 | `reactive.{h,c}` | Lock-free **SPSC press queue** (event thread → render thread) feeding an 8-slot ripple pool + per-LED `key_heat[83]`. |
 | `overlay.{h,c}` | Functional indicators (CapsLock / Fn-highlight / battery gauge). Pure, ZMK-free. |
-| `led_map.{h,c}` | Calibrated `pos_to_led[83]` + `led_positions[83]` (XY) + lookups. |
+| `led_map.{h,c}` | Calibrated `pos_to_led[83]` + `led_positions[83]` (XY) + lookups. ISO and ANSI table variants (`CONFIG_RAINY_RGB_ANSI_LEDMAP`, set by `./build.sh --ansi`). |
 | `state.c` | NVS persistence (`SETTINGS_STATIC_HANDLER`, subtree `rainy_rgb/`, 2 s debounce). |
 | `zmk_adapter.{h,c}` | **ZMK boundary**: led_strip wrap + `ZMK_LISTENER`/`ZMK_SUBSCRIPTION` for position/layer/hid-indicators/battery → neutral setters. |
 | `../behaviors/behavior_rainy_rgb.c` | **ZMK boundary**: the `&rgb` keymap behavior → engine API. |
@@ -88,9 +88,17 @@ hardware calibration mapped each LED to the key above it; the result is baked in
 `zmk,physical-layout`, uniform-scaled so ripples stay circular). The chain is
 identity except: after ISO-Enter it routes `→ PGUP → CapsLock…NUHS → PGDN`.
 
-The calibration *mode* (lit-one-LED-at-a-time + serial dump) was removed after use.
-To re-calibrate, re-add it from git history (commit `4db7325`) or a temporary
-diagnostic effect.
+**ANSI variant** (`CONFIG_RAINY_RGB_ANSI_LEDMAP`, set automatically by
+`./build.sh --ansi`): the ANSI PCB's WS2812 chain has **81 LEDs** — it omits the LED
+under the ISO `<>` (NUBS) slot and the one under the key right of Space — so ANSI
+builds select their own `pos_to_led[]`/XY tables (calibrated on real ANSI hardware,
+issue #4). The Enter-cluster detour is identical on both PCBs; the two LED-less
+keymap positions park on their neighbor's LED so XY lookups stay physically true.
+
+The calibration *mode* (lit-one-LED-at-a-time + serial dump) was removed after use
+(pre-release, not in the public history). To re-calibrate, the quickest ground truth
+is a temporary walker effect: light a single LED, step the chain index on any
+keypress, note which key each index sits under.
 
 ## Functional indicators (Phase 4, overlay)
 

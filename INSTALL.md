@@ -167,10 +167,11 @@ can't silently get an ISO build (or vice-versa):
 ```
 
 ANSI puts the wide **Enter** on its real matrix cell `RC(3,13)`, makes the key above it
-**Backslash**, and drops the ISO `<>` key. These matrix positions were **verified on real
-ANSI hardware** by [@jaxx2104](https://github.com/jaxx2104) (issue #1). Still being
-confirmed: the per-key **RGB** mapping around the Enter cluster — if you run ANSI, reports
-welcome ([CONTRIBUTING.md](CONTRIBUTING.md#layout-variants-iso--ansi)).
+**Backslash**, and drops the ISO `<>` key. The matrix positions were **verified on real
+ANSI hardware** by [@jaxx2104](https://github.com/jaxx2104) (issue #1), and the per-key
+**RGB** map by [@ecliptik](https://github.com/ecliptik) (issue #4): the ANSI strip has 81
+LEDs, so `--ansi` also selects an ANSI-calibrated LED map
+([CONTRIBUTING.md](CONTRIBUTING.md#layout-variants-iso--ansi)).
 
 ---
 
