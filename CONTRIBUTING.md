@@ -90,7 +90,10 @@ ANSI drops the ISO `<>` key (full-width Left-Shift) and remaps the Enter / backs
 via the `K_ENTER_TOP` / `K_HASH` / `K_LT_GT` macros in `rainy75.keymap`, plus a conditional
 row in the matrix transform in `rainy75.dts`. Selection rides the devicetree-preprocessor
 symbol `RAINY75_ANSI` (`--ansi` passes `-DDTS_EXTRA_CPPFLAGS=-DRAINY75_ANSI`) — a Kconfig
-`#ifdef` can't drive it, because devicetree is preprocessed before Kconfig runs.
+`#ifdef` can't drive it, because devicetree is preprocessed before Kconfig runs. For the
+C side (the per-key RGB LED map), `--ansi` additionally sets
+`CONFIG_RAINY_RGB_ANSI_LEDMAP=y`, which selects the ANSI-calibrated tables in
+`zmk/src/rainy_rgb/led_map.c`.
 
 The keymap + matrix positions were **verified on real ANSI hardware** by
 [@jaxx2104](https://github.com/jaxx2104) ([#1](https://github.com/scholzri/rainy75-zmk/issues/1)):
@@ -98,9 +101,14 @@ the wide Enter is `RC(3,13)`, the key above it is Backslash (`RC(2,13)`), and th
 slot (`RC(4,1)`) is unpopulated. (Originally derived from the vendor VIA layout,
 [trkw/rainy75-v2-json](https://github.com/trkw/rainy75-v2-json).)
 
-**Still open:** the per-key RGB `led_map` near Enter (the spatial effects use XY positions).
-If you run ANSI, confirming the LEDs light the right physical keys around the Enter cluster
-would close this out — please open an issue or PR.
+The per-key RGB `led_map` was **calibrated and verified on real ANSI hardware** by
+[@ecliptik](https://github.com/ecliptik)
+([#4](https://github.com/scholzri/rainy75-zmk/issues/4),
+[#5](https://github.com/scholzri/rainy75-zmk/pull/5)): the ANSI WS2812 chain has **81
+LEDs** (no LED under the ISO `<>` slot or the key right of Space), so ANSI builds use
+their own `pos_to_led[]`/XY tables. The Enter-cluster chain detour is identical on both
+PCBs. If you re-calibrate (e.g. for a sibling board), a temporary walker effect — one LED
+lit, any keypress steps the chain — is the quickest ground truth.
 
 ## Licensing
 

@@ -124,7 +124,7 @@ read on their own.
 | **Recover a bricked board** | Telink burning board over the SWS pads — [docs/recovery.md](docs/recovery.md). |
 | **Open the case / service the battery** | Photo teardown walkthrough — [docs/teardown.md](docs/teardown.md). |
 | **Customize the keymap / RGB** | Edit `zmk/boards/rainy75/rainy75.keymap`; RGB controls in [docs/rainy-rgb.md](docs/rainy-rgb.md). |
-| **Use the ANSI layout** | `./build.sh -a --ansi` — keymap verified on real ANSI hardware (per-key RGB near Enter still being confirmed), see [INSTALL.md](INSTALL.md#ansi-layout). |
+| **Use the ANSI layout** | `./build.sh -a --ansi` — keymap **and** per-key RGB verified on real ANSI hardware, see [INSTALL.md](INSTALL.md#ansi-layout). |
 | **Contribute** | [CONTRIBUTING.md](CONTRIBUTING.md). |
 
 ---
@@ -152,9 +152,9 @@ lighting engine: [docs/rainy-rgb.md](docs/rainy-rgb.md).
   isn't reverse-engineered or implemented here. This firmware is **USB + BLE only**.
 - **Battery percentage** — the battery ADC (pin / divider / Vref) isn't hardware-validated,
   so the gauge is approximate.
-- **ANSI layout** — supported (`./build.sh --ansi`); keymap + matrix verified on real ANSI
-  hardware by a contributor. The per-key **RGB** mapping around the Enter cluster is the
-  one piece still being confirmed ([details](CONTRIBUTING.md#layout-variants-iso--ansi)).
+- **ANSI layout** — supported (`./build.sh --ansi`); keymap + matrix **and** per-key RGB
+  verified on real ANSI hardware by contributors (the ANSI strip has 81 LEDs and its own
+  calibrated map — [details](CONTRIBUTING.md#layout-variants-iso--ansi)).
 
 ---
 
@@ -212,8 +212,9 @@ for the build/test/PR workflow and the code layout.
   tests (`./zmk/src/rainy_rgb/tests/run_host_tests.sh`).
 - **Keep it out-of-tree:** new functionality lives under `zmk/`, so the ZMK pin can be
   bumped without losing it.
-- **ANSI / other layouts:** if you have an ANSI board, help confirm the per-key RGB near
-  Enter — see [CONTRIBUTING.md](CONTRIBUTING.md#layout-variants-iso--ansi).
+- **ANSI / other layouts:** ANSI is fully verified on hardware; other regional ISO
+  layouts are mostly a keymap change — see
+  [CONTRIBUTING.md](CONTRIBUTING.md#layout-variants-iso--ansi).
 
 ---
 
