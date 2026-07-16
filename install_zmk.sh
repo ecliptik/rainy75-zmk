@@ -131,8 +131,8 @@ if ! check_usb "$STOCK_VID" "$STOCK_PID"; then
 fi
 
 info "Stock firmware detected."
-info "  Bridge: $BRIDGE_IMAGE ($(stat -c%s "$BRIDGE_IMAGE") bytes)"
-info "  ZMK:    $ZMK_IMAGE ($(stat -c%s "$ZMK_IMAGE") bytes)"
+info "  Bridge: $BRIDGE_IMAGE ($(wc -c < "$BRIDGE_IMAGE" | tr -d ' ') bytes)"
+info "  ZMK:    $ZMK_IMAGE ($(wc -c < "$ZMK_IMAGE" | tr -d ' ') bytes)"
 
 if [[ $AUTO_YES -eq 0 ]]; then
     echo ""

@@ -93,7 +93,7 @@ if ! check_usb "$ZMK_VID" "$ZMK_PID"; then
 fi
 
 info "ZMK firmware detected."
-info "  Firmware: $FIRMWARE ($(stat -c%s "$FIRMWARE") bytes)"
+info "  Firmware: $FIRMWARE ($(wc -c < "$FIRMWARE" | tr -d ' ') bytes)"
 info "  Port: $SERIAL_PORT"
 
 if [[ $AUTO_YES -eq 0 ]]; then
