@@ -9,7 +9,7 @@ Custom ZMK firmware for the Wobkey Rainy 75 Pro ISO DE keyboard, targeting the T
 | Build infrastructure | **Done** | west workspace, Zephyr module, CMake/Kconfig |
 | Board definition | **Done** | HWMv2 format, DTS, keymap, defconfig |
 | BLE HCI driver | **Done** | Real blob linked, Zephyr v4.1 device-model API |
-| USB DC driver | **Done** | Legacy `usb_dc.h` API, linked and enabled |
+| USB DC driver | **Done** | Legacy `usb_dc.h` API; polled suspend + ISR resume, dead-bus reconnect recovery (`CONFIG_ZMK_USB_SUSPEND_REATTACH`) |
 | RGB LED strip | **Done** | WS2812 via PSPI + DMA ch4, PB7 MOSI, 83 per-key LEDs, ZMK underglow enabled |
 | Battery ADC sensor | **Done** | SAR ADC driver, PD1 channel 0x0A, 1/2 divider, BLE battery service |
 | Deep sleep | **Done** | `sys_poweroff` → DEEPSLEEP_MODE (cold boot), 15min idle timeout |
