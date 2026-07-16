@@ -45,6 +45,8 @@ struct usb_dc_b91_state {
 	usb_dc_ep_callback     ep_cb[2][NUM_EP]; /* [0]=OUT [1]=IN */
 	struct usb_dc_b91_ep   ep[NUM_EP];
 	bool                   attached;
+	bool                   suspended;        /* bus idle observed by suspend poll */
+	volatile uint32_t      isr_events;       /* ISR entry counter (bus activity) */
 	bool                   ep0_in_transfer;  /* current EP0 direction from SETUP */
 	uint8_t                ep_in_toggle[NUM_EP]; /* DATA0/1 toggle: PID the host expects next */
 	bool                   ep_in_pending[NUM_EP]; /* IN transfer armed, awaiting host ACK */
@@ -257,6 +259,81 @@ static void irq_connect_all(void)
 }
 
 /* ========================================================================== *
+ *  Suspend Detection (polled)                                                  *
+ *                                                                             *
+ *  The suspend condition (bus idle > 3 ms) is routed to PLIC source 24        *
+ *  (IRQ24_USB_PWDN), which this driver intentionally does NOT connect: the    *
+ *  condition is level-like while the bus stays idle and would re-fire         *
+ *  continuously.  Instead a delayable work polls the w1c SUSPEND status bit.  *
+ *  USB_DC_SUSPEND is delivered once per active->idle edge; delivering it      *
+ *  repeatedly would let consumers that k_work_reschedule() on the event       *
+ *  (e.g. ZMK's suspend re-attach watchdog) push their deadline forever.      *
+ *  USB_DC_RESUME is delivered from the ISR on the first bus activity after    *
+ *  a suspend (any connected USB IRQ implies traffic).                         *
+ * ========================================================================== */
+
+#define B91_USB_SUSPEND_POLL_MS 500
+
+static void suspend_poll_cb(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(suspend_poll_work, suspend_poll_cb);
+
+/* Poll-local trackers (poll runs only on the system workqueue). */
+static uint32_t poll_last_isr_events;
+static uint8_t poll_last_bits;
+
+static void suspend_poll_cb(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (!state.attached) {
+		return;
+	}
+
+	uint8_t irq_mask_reg = usb_read8(B91_USB_IRQ_MASK);
+	uint8_t bits = irq_mask_reg &
+		       (B91_USB_IRQ_SUSPEND_O | B91_USB_IRQ_250US_O);
+
+	/* "quiet" = no USB interrupt (traffic/reset) since the previous tick.
+	 * A latched SUSPEND_O bit observed after traffic is stale — it latched
+	 * during the idle gap that precedes every enumeration (attach ->
+	 * debounce -> reset) — and must NOT be reported: a false SUSPEND mutes
+	 * HID (zmk_usb_hid_send_report drops reports while suspended) and lets
+	 * the ZMK re-attach watchdog tear down a healthy connection. */
+	uint32_t ev = state.isr_events;
+	bool quiet = (ev == poll_last_isr_events);
+
+	poll_last_isr_events = ev;
+
+	if (bits != poll_last_bits) {
+		/* Diagnostic: trace status-bit behaviour (latch/re-assert
+		 * semantics are undocumented; this log is how we verify them
+		 * on hardware). */
+		LOG_DBG("poll: sups=%d 250us=%d lvl=%d quiet=%d ev=%u susp=%d",
+			!!(bits & B91_USB_IRQ_SUSPEND_O),
+			!!(bits & B91_USB_IRQ_250US_O),
+			!!(irq_mask_reg & B91_USB_IRQ_250US_LVL), quiet, ev,
+			state.suspended);
+		poll_last_bits = bits;
+	}
+
+	if (bits) {
+		/* w1c: clear observed status bits so the next tick reflects a
+		 * fresh hardware assertion. Preserve mask bits (0-2). */
+		usb_write8(B91_USB_IRQ_MASK, (irq_mask_reg & 0x07) | bits);
+	}
+
+	if ((bits & B91_USB_IRQ_SUSPEND_O) && quiet && !state.suspended) {
+		state.suspended = true;
+		LOG_DBG("USB bus idle; reporting SUSPEND");
+		if (state.status_cb) {
+			state.status_cb(USB_DC_SUSPEND, NULL);
+		}
+	}
+
+	k_work_reschedule(&suspend_poll_work, K_MSEC(B91_USB_SUSPEND_POLL_MS));
+}
+
+/* ========================================================================== *
  *  Lifecycle Functions                                                         *
  * ========================================================================== */
 
@@ -338,6 +415,10 @@ int usb_dc_attach(void)
 	}
 
 	state.attached = true;
+	state.suspended = false;
+	poll_last_isr_events = state.isr_events;
+	poll_last_bits = 0;
+	k_work_reschedule(&suspend_poll_work, K_MSEC(B91_USB_SUSPEND_POLL_MS));
 	LOG_INF("B91 USB attached");
 
 	/* Notify stack that physical connection is established.
@@ -351,6 +432,8 @@ int usb_dc_attach(void)
 
 int usb_dc_detach(void)
 {
+	k_work_cancel_delayable(&suspend_poll_work);
+
 	dp_pullup_en(false);
 	usb_power_on(false);
 
@@ -359,6 +442,7 @@ int usb_dc_detach(void)
 	}
 
 	state.attached = false;
+	state.suspended = false;
 	LOG_INF("B91 USB detached");
 	return 0;
 }
@@ -422,6 +506,19 @@ static void usb_dc_b91_isr(const void *arg)
 	uint8_t ctrl_ep_irq = usb_read8(B91_USB_CTRL_EP_IRQ_STA);
 	uint8_t ep_irq = usb_read8(B91_USB_EP_IRQ_STATUS);
 
+	/* --- Resume detection --- */
+	/* This ISR only runs on the connected traffic/reset IRQs, so any entry
+	 * means the bus is active again. Report RESUME first so a RESET in the
+	 * same pass is the final status the stack observes. */
+	state.isr_events++;
+	if (state.suspended) {
+		state.suspended = false;
+		LOG_DBG("USB bus active again; reporting RESUME");
+		if (state.status_cb) {
+			state.status_cb(USB_DC_RESUME, NULL);
+		}
+	}
+
 	/* --- Bus Reset (highest priority) --- */
 	if (irq_mask_reg & B91_USB_IRQ_RESET_O) {
 		/* Clear ONLY RESET_O status bit (w1c). Preserve mask bits (0-2),
@@ -468,15 +565,11 @@ static void usb_dc_b91_isr(const void *arg)
 		}
 	}
 
-	/* --- Bus Suspend --- */
-	if (irq_mask_reg & B91_USB_IRQ_SUSPEND_O) {
-		usb_write8(B91_USB_IRQ_MASK,
-			   (irq_mask_reg & 0x07) | B91_USB_IRQ_SUSPEND_O);
-
-		if (state.status_cb) {
-			state.status_cb(USB_DC_SUSPEND, NULL);
-		}
-	}
+	/* NOTE: bus suspend is NOT handled here. The SUSPEND status routes to
+	 * PLIC source 24 (IRQ24_USB_PWDN), which is never connected, so this
+	 * ISR could only ever observe it opportunistically while other traffic
+	 * fired — i.e. exactly when the bus is NOT suspended. Suspend delivery
+	 * lives in suspend_poll_cb() above. */
 
 	/* --- EP0 SETUP --- */
 	if (ctrl_ep_irq & B91_CTRL_EP_IRQ_SETUP) {
