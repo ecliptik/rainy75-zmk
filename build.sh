@@ -94,7 +94,7 @@ if [ "$BUILD_MCUBOOT" -eq 1 ]; then
         "-DZMK_EXTRA_MODULES=$(pwd)/zmk;$(pwd)/zmk-src/app" \
         $VERBOSE_CMAKE
 
-    SIZE=$(stat -c%s build-mcuboot/zephyr/zephyr.bin)
+    SIZE=$(wc -c < build-mcuboot/zephyr/zephyr.bin | tr -d ' ')
     echo "MCUboot binary: $SIZE bytes (max 65536 for 64KB boot partition)"
     if [ "$SIZE" -gt 65536 ]; then
         echo "ERROR: MCUboot exceeds 64KB boot partition!" >&2
@@ -104,7 +104,7 @@ fi
 
 # ── App build ──────────────────────────────────────────────────
 if [ "$BUILD_APP" -eq 1 ]; then
-    echo "=== Building ZMK app (${LAYOUT^^} layout) ==="
+    echo "=== Building ZMK app ($(echo "$LAYOUT" | tr a-z A-Z) layout) ==="
     west build $PRISTINE -b rainy75 zmk-src/app -- \
         -DZMK_CONFIG="$(pwd)/zmk/boards/rainy75" \
         -DZMK_EXTRA_MODULES="$(pwd)/zmk" \
@@ -166,7 +166,7 @@ if [ "$BUILD_BRIDGE" -eq 1 ]; then
         exit 1
     fi
 
-    SIZE=$(stat -c%s build-bridge/zephyr/zmk.bin)
+    SIZE=$(wc -c < build-bridge/zephyr/zmk.bin | tr -d ' ')
     echo "Bridge binary: $SIZE bytes"
 
     # Safety: bridge + ZMK combined must both fit below calibration (0xFE000)
