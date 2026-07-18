@@ -34,6 +34,7 @@ static inline uint32_t rrgb_speed_increment(uint8_t speed) {
 
 struct rrgb_runtime {
     bool on;
+    bool idle;   /* activity-idle blank (CONFIG_RAINY_RGB_IDLE_BLANK); never persisted */
     uint8_t effect;
     uint8_t hue, sat, val, speed;
     uint32_t tick;
@@ -111,8 +112,13 @@ static void rrgb_loop(void *a, void *b, void *c) {
         int64_t deadline = k_uptime_get() + RRGB_PERIOD_MS;
 
         /* Render when the effect is on OR a functional overlay (caps / Fn-highlight
-         * / battery gauge) needs to show — so indicators work even with RGB off. */
-        if (rt.on || host_mode || rrgb_overlay_active(rt.tick)) {
+         * / battery gauge) needs to show — so indicators work even with RGB off.
+         * With CONFIG_RAINY_RGB_IDLE_BLANK, activity-idle also blanks the strip
+         * (first keypress restores it); host direct mode overrides the blank so a
+         * host notification pulse still shows when the board is idle. When the
+         * option is off, IS_ENABLED() folds idle_off to false — identical behaviour. */
+        bool idle_off = IS_ENABLED(CONFIG_RAINY_RGB_IDLE_BLANK) && rt.idle && !host_mode;
+        if (!idle_off && (rt.on || host_mode || rrgb_overlay_active(rt.tick))) {
             render_once();
             was_lit = true;
         } else if (was_lit) {
@@ -196,6 +202,14 @@ void rrgb_host_clear(void) {
 
 bool rrgb_host_active(void) {
     return host_mode;
+}
+/* Activity-idle hook (CONFIG_RAINY_RGB_IDLE_BLANK). Fed by the ZMK
+ * activity_state_changed event; the render loop blanks while idle. */
+void rrgb_set_idle(bool idle) {
+    if (rt.idle != idle) {
+        rt.idle = idle;
+        LOG_INF("rgb %s (activity)", idle ? "idle-off" : "resume");
+    }
 }
 void rrgb_on_key(uint32_t position, bool pressed) {
     if (pressed) {

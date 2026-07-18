@@ -117,6 +117,18 @@ Rendered on top of the active effect — and **still shown when RGB is toggled o
   (green→red), ~3 s. **Approximate** — the battery-ADC pin/divider/Vref are not yet
   hardware-validated (see Open items).
 
+## Activity-idle blank (opt-in)
+
+With `CONFIG_RAINY_RGB_IDLE_BLANK=y` the strip turns **off after
+`CONFIG_ZMK_IDLE_TIMEOUT` of no activity** (typing / pointing) and comes back on
+the first keypress — while the board is still awake, before deep sleep. On
+wireless this saves the per-key LED current during idle-but-awake stretches
+(deep sleep already blanks everything; this covers the gap before it). The
+engine subscribes to ZMK's `activity_state_changed` event and gates the render
+loop on `rt.idle`. Host direct mode (`rgb_mgmt`) overrides the blank, so a host
+notification pulse still shows when the board is idle (that's when you're away).
+Off by default — `IS_ENABLED()` folds it out with zero behaviour change.
+
 ## Config (in `conf/app.conf`)
 
 - `CONFIG_ZMK_RGB_UNDERGLOW=n` (our engine owns the strip)

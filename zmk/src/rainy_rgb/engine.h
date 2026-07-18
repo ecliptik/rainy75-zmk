@@ -16,6 +16,7 @@ void rrgb_hue_step(int dir);
 void rrgb_val_step(int dir);
 void rrgb_speed_step(int dir);
 void rrgb_on_key(uint32_t position, bool pressed);
+void rrgb_set_idle(bool idle);   /* activity-idle blank (CONFIG_RAINY_RGB_IDLE_BLANK) */
 void rrgb_battery_gauge_show(void);
 
 void rrgb_get_persist(struct rrgb_persist *out);
