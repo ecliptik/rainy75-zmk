@@ -34,7 +34,10 @@ static inline uint32_t rrgb_speed_increment(uint8_t speed) {
 
 struct rrgb_runtime {
     bool on;
-    bool idle;   /* activity-idle blank (CONFIG_RAINY_RGB_IDLE_BLANK); never persisted */
+    /* Activity-idle blank (CONFIG_RAINY_RGB_IDLE_BLANK); never persisted.
+     * Written from the ZMK event thread, read by the render thread — volatile
+     * without locking, same pattern as host_mode below. */
+    volatile bool idle;
     uint8_t effect;
     uint8_t hue, sat, val, speed;
     uint32_t tick;

@@ -11,9 +11,7 @@
 #include <zmk/events/layer_state_changed.h>
 #include <zmk/events/hid_indicators_changed.h>
 #include <zmk/events/battery_state_changed.h>
-#if IS_ENABLED(CONFIG_RAINY_RGB_IDLE_BLANK)
 #include <zmk/events/activity_state_changed.h>
-#endif
 #include "engine.h"
 #include "overlay.h"
 
