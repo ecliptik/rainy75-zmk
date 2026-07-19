@@ -105,10 +105,14 @@ fi
 # ── App build ──────────────────────────────────────────────────
 if [ "$BUILD_APP" -eq 1 ]; then
     echo "=== Building ZMK app ($(echo "$LAYOUT" | tr a-z A-Z) layout) ==="
+    # Fork-local config overlay: if conf/ecliptik.conf exists, layer it AFTER
+    # conf/app.conf so its assignments win. Absent on upstream/main -> no-op.
+    APP_CONF="$(pwd)/conf/app.conf"
+    [ -f "$(pwd)/conf/ecliptik.conf" ] && APP_CONF="$APP_CONF;$(pwd)/conf/ecliptik.conf"
     west build $PRISTINE -b rainy75 zmk-src/app -- \
         -DZMK_CONFIG="$(pwd)/zmk/boards/rainy75" \
         -DZMK_EXTRA_MODULES="$(pwd)/zmk" \
-        -DEXTRA_CONF_FILE="$(pwd)/conf/app.conf" \
+        -DEXTRA_CONF_FILE="$APP_CONF" \
         -DEXTRA_DTC_OVERLAY_FILE="$(pwd)/zmk/boards/rainy75/rainy75.keymap;$(pwd)/conf/mcumgr.overlay" \
         $ANSI_DTFLAG \
         $VERBOSE_CMAKE
