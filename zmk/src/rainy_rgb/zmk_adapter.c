@@ -11,6 +11,9 @@
 #include <zmk/events/layer_state_changed.h>
 #include <zmk/events/hid_indicators_changed.h>
 #include <zmk/events/battery_state_changed.h>
+#if IS_ENABLED(CONFIG_RAINY_RGB_IDLE_BLANK)
+#include <zmk/events/activity_state_changed.h>
+#endif
 #include "engine.h"
 #include "overlay.h"
 
@@ -47,6 +50,11 @@ static int rrgb_event_listener(const zmk_event_t *eh) {
     const struct zmk_battery_state_changed *bev = as_zmk_battery_state_changed(eh);
     if (bev) { rrgb_overlay_set_battery(bev->state_of_charge); }
 
+#if IS_ENABLED(CONFIG_RAINY_RGB_IDLE_BLANK)
+    const struct zmk_activity_state_changed *aev = as_zmk_activity_state_changed(eh);
+    if (aev) { rrgb_set_idle(aev->state != ZMK_ACTIVITY_ACTIVE); }
+#endif
+
     return ZMK_EV_EVENT_BUBBLE;   /* passive observer */
 }
 ZMK_LISTENER(rrgb_listener, rrgb_event_listener);
@@ -54,6 +62,9 @@ ZMK_SUBSCRIPTION(rrgb_listener, zmk_position_state_changed);
 ZMK_SUBSCRIPTION(rrgb_listener, zmk_layer_state_changed);
 ZMK_SUBSCRIPTION(rrgb_listener, zmk_hid_indicators_changed);
 ZMK_SUBSCRIPTION(rrgb_listener, zmk_battery_state_changed);
+#if IS_ENABLED(CONFIG_RAINY_RGB_IDLE_BLANK)
+ZMK_SUBSCRIPTION(rrgb_listener, zmk_activity_state_changed);
+#endif
 
 static int rrgb_overlay_seed(void) {
     rrgb_overlay_set_caps((zmk_hid_indicators_get_current_profile() & BIT(1)) != 0);
