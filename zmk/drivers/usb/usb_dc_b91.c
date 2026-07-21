@@ -38,6 +38,8 @@ struct usb_dc_b91_ep {
 	uint8_t  buf[64];       /* OUT data staging buffer */
 	uint16_t buf_len;       /* bytes received */
 	uint16_t buf_offset;    /* read cursor for read_wait */
+	uint8_t  sram_addr;     /* USB SRAM buffer offset owned by this EP */
+	uint8_t  sram_size;     /* size of that buffer; 0 = none allocated */
 };
 
 struct usb_dc_b91_state {
@@ -365,6 +367,8 @@ int usb_dc_attach(void)
 		state.ep[i].stalled = false;
 		state.ep[i].buf_len = 0;
 		state.ep[i].buf_offset = 0;
+		state.ep[i].sram_addr = 0;
+		state.ep[i].sram_size = 0;
 	}
 
 	/* 1. Enable USB clock and release from reset */
@@ -463,6 +467,8 @@ int usb_dc_reset(void)
 		state.ep[i].stalled = false;
 		state.ep[i].buf_len = 0;
 		state.ep[i].buf_offset = 0;
+		state.ep[i].sram_addr = 0;
+		state.ep[i].sram_size = 0;
 	}
 
 	/* Reset DATA toggle to DATA0 for all endpoints (USB spec) */
@@ -836,22 +842,45 @@ int usb_dc_ep_configure(const struct usb_dc_ep_cfg_data *const cfg)
 	if (n >= 1 && n <= 7) {
 		bool is_out = !(cfg->ep_addr & 0x80); /* bit 7 = IN */
 		uint8_t buf_size = is_out ? 64 : ROUND_UP(cfg->ep_mps, 8);
-		uint8_t alloc_end = usb_sram_next + buf_size;
 
-		if (alloc_end > USB_SRAM_SIZE) {
-			LOG_ERR("EP 0x%02x: USB SRAM exhausted! need %u, "
-				"have %u of %u free",
-				cfg->ep_addr, buf_size,
-				USB_SRAM_SIZE - usb_sram_next, USB_SRAM_SIZE);
-			return -ENOMEM;
+		/*
+		 * Allocation must be idempotent: the stack re-runs
+		 * usb_dc_ep_configure() for every EP on EVERY SET_CONFIGURATION,
+		 * and a host can re-enumerate without a detach/attach cycle
+		 * (macOS does on sleep/wake).  usb_sram_next is only reset in
+		 * attach, so bump-allocating again here would leak the pool:
+		 * the second enumeration starts where the first ended and the
+		 * 64B bulk EPs no longer fit.  set_endpoint() failures are
+		 * non-fatal to SET_CONFIGURATION (a later EP's success
+		 * overwrites `found`), so the host sees a configured device
+		 * with silently dead endpoints — CDC ACM mute, HID alive.
+		 * Reuse the EP's existing buffer instead.
+		 */
+		if (state.ep[n].sram_size >= buf_size) {
+			usb_write8(B91_USB_EP_BUF_ADDR(n), state.ep[n].sram_addr);
+			LOG_DBG("EP 0x%02x: USB SRAM [%u..%u) reused",
+				cfg->ep_addr, state.ep[n].sram_addr,
+				(uint16_t)state.ep[n].sram_addr + buf_size);
+		} else {
+			uint8_t alloc_end = usb_sram_next + buf_size;
+
+			if (alloc_end > USB_SRAM_SIZE) {
+				LOG_ERR("EP 0x%02x: USB SRAM exhausted! need %u, "
+					"have %u of %u free",
+					cfg->ep_addr, buf_size,
+					USB_SRAM_SIZE - usb_sram_next, USB_SRAM_SIZE);
+				return -ENOMEM;
+			}
+
+			usb_write8(B91_USB_EP_BUF_ADDR(n), usb_sram_next);
+			LOG_INF("EP 0x%02x: USB SRAM [%u..%u) (%uB %s)",
+				cfg->ep_addr, usb_sram_next,
+				(uint16_t)usb_sram_next + buf_size, buf_size,
+				is_out ? "OUT" : "IN");
+			state.ep[n].sram_addr = usb_sram_next;
+			state.ep[n].sram_size = buf_size;
+			usb_sram_next = alloc_end;
 		}
-
-		usb_write8(B91_USB_EP_BUF_ADDR(n), usb_sram_next);
-		LOG_INF("EP 0x%02x: USB SRAM [%u..%u) (%uB %s)",
-			cfg->ep_addr, usb_sram_next,
-			(uint16_t)usb_sram_next + buf_size, buf_size,
-			is_out ? "OUT" : "IN");
-		usb_sram_next = alloc_end;
 	}
 
 	LOG_INF("EP 0x%02x configured: MPS=%u type=%u",
