@@ -9,6 +9,11 @@ the Telink TLSR9511 (B91, RISC-V) platform shared across a dozen enthusiast keyb
 [![MCU](https://img.shields.io/badge/MCU-Telink%20TLSR9511%20(B91)-orange)](docs/architecture.md)
 [![Status](https://img.shields.io/badge/status-hardware--verified-success)](#status)
 
+> ⚠️ **Official source:** github.com/scholzri/rainy75-zmk — this project ships
+> **source code only**, never a `.zip`/`.exe` download, and the Rainy 75 has **no
+> UF2 drag-and-drop bootloader**. Sites offering a "firmware download" for this
+> project are **fake and serve malware** — see [SECURITY.md](SECURITY.md).
+
 ![The Rainy 75 Pro running this ZMK firmware](docs/images/hero.jpg)
 
 ---
