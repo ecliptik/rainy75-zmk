@@ -1,0 +1,135 @@
+/*
+ * Copyright (c) 2026 ecliptik
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * CDC starvation recovery — overrides the USB DC driver's weak
+ * b91_usb_cdc_starved() hook.
+ *
+ * When the driver detects the CDC bulk OUT endpoint dead for minutes while
+ * the host holds the device configured (the wedge observed after macOS
+ * sleep/dark-wake enumeration churn: CDC mute both directions, HID alive,
+ * host believes everything is fine), the only clean recovery is the same one
+ * a cable pull triggers: a full detach/re-attach cycle, which the host
+ * answers with a fresh enumeration that rebuilds the class transfers.  HID
+ * drops for the ~1-2 s the cycle takes.
+ *
+ * Before recovering, the diag ring is persisted via settings/NVS: with the
+ * wireless switch off the board is VBUS-powered only, so a cable pull is a
+ * full power cycle and .noinit SRAM does NOT survive it — flash is the only
+ * medium that can carry the pre-wedge event sequence across the user's
+ * instinctive replug.  Read back post-mortem with usb_diag.py --saved.
+ */
+
+#include <string.h>
+#include <zephyr/kernel.h>
+#include <zephyr/usb/usb_device.h>
+#include <zephyr/logging/log.h>
+
+#include <b91_usb_diag.h>
+
+#if IS_ENABLED(CONFIG_SETTINGS)
+#include <zephyr/settings/settings.h>
+#endif
+
+LOG_MODULE_REGISTER(usb_cdc_recover, LOG_LEVEL_INF);
+
+/* ZMK's USB status callback (app/src/usb.c, non-static) — re-attach must
+ * re-register it or ZMK stops tracking the connection state. */
+void usb_status_cb(enum usb_dc_status_code status, const uint8_t *params);
+
+/* One re-attach per holdoff window.  The only false-positive path (a host
+ * that stuffed the CDC ring while nothing on the host reads the port) would
+ * otherwise re-trigger every starvation threshold. */
+#define RECOVER_HOLDOFF_MS (10 * 60 * 1000)
+
+static int64_t last_recover_at = -RECOVER_HOLDOFF_MS;
+
+/* Saved-ring blob: u32 seq, u32 count, then count b91_usb_diag_evt records.
+ * One buffer for the copy loaded from settings at boot (last wedge, possibly
+ * a prior power cycle), one staging buffer for the save path. */
+#define RING_BLOB_MAX (8 + 64 * sizeof(struct b91_usb_diag_evt))
+
+static uint8_t saved_ring[RING_BLOB_MAX];
+static size_t saved_ring_len;
+
+size_t b91_usb_diag_saved(const uint8_t **blob)
+{
+	*blob = saved_ring;
+	return saved_ring_len;
+}
+
+#if IS_ENABLED(CONFIG_SETTINGS)
+
+static int ring_settings_set(const char *name, size_t len,
+			     settings_read_cb read_cb, void *cb_arg)
+{
+	if (strcmp(name, "ring") != 0 || len > sizeof(saved_ring)) {
+		return -ENOENT;
+	}
+
+	ssize_t rd = read_cb(cb_arg, saved_ring, len);
+
+	if (rd >= 0) {
+		saved_ring_len = rd;
+		LOG_INF("loaded saved USB diag ring (%u bytes)", (unsigned)rd);
+	}
+	return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(b91usb, "b91usb", NULL, ring_settings_set,
+			       NULL, NULL);
+
+static void ring_persist(void)
+{
+	static uint8_t blob[RING_BLOB_MAX];
+	struct b91_usb_diag_evt *evts = (void *)(blob + 8);
+	uint32_t seq = 0;
+	size_t n = b91_usb_diag_snapshot(evts, 0, 64, &seq);
+
+	memcpy(blob, &seq, 4);
+	uint32_t n32 = n;
+
+	memcpy(blob + 4, &n32, 4);
+
+	int rc = settings_save_one("b91usb/ring", blob,
+				   8 + n * sizeof(evts[0]));
+
+	LOG_WRN("USB diag ring persisted to flash (%u events, rc=%d)",
+		(unsigned)n, rc);
+}
+
+#else /* !CONFIG_SETTINGS */
+
+static void ring_persist(void)
+{
+}
+
+#endif
+
+static void recover_work_cb(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	ring_persist();
+
+	LOG_WRN("CDC starved: cycling USB re-attach");
+	usb_disable();
+	k_msleep(50);
+	int rc = usb_enable(usb_status_cb);
+
+	LOG_WRN("CDC recovery re-attach done (rc=%d)", rc);
+}
+
+static K_WORK_DEFINE(recover_work, recover_work_cb);
+
+void b91_usb_cdc_starved(void)
+{
+	int64_t now = k_uptime_get();
+
+	if (now - last_recover_at < RECOVER_HOLDOFF_MS) {
+		LOG_WRN("CDC starved again within holdoff; skipping");
+		return;
+	}
+	last_recover_at = now;
+	k_work_submit(&recover_work);
+}
