@@ -153,3 +153,50 @@ void b91_usb_cdc_starved(void)
 	last_recover_at = now;
 	k_work_submit(&recover_work);
 }
+
+/* ------------------------------------------------------------------------
+ * On-demand re-attach stress (flash_mgmt group 64 cmd 5).
+ *
+ * Every captured wedge was born in the re-enumeration/re-attach burst —
+ * never in plain suspend/resume (8/8 clean RTC wake cycles).  This lets a
+ * host script trigger that exact burst repeatedly, with SMP traffic racing
+ * the cancels, turning a once-a-day organic repro into an on-demand one.
+ * Runs on the system workqueue so a killed USB workqueue can't stop it.
+ * ------------------------------------------------------------------------ */
+
+static uint32_t stress_remaining;
+static uint32_t stress_gap_ms;
+
+static void stress_work_cb(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(stress_work, stress_work_cb);
+
+static void stress_work_cb(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (stress_remaining == 0) {
+		return;
+	}
+	stress_remaining--;
+	LOG_WRN("stress: re-attach cycle (%u left)", stress_remaining);
+	usb_disable();
+	k_msleep(50);
+	usb_enable(usb_status_cb);
+
+	if (stress_remaining > 0) {
+		k_work_reschedule(&stress_work, K_MSEC(stress_gap_ms));
+	} else {
+		LOG_WRN("stress: run complete");
+	}
+}
+
+void b91_usb_stress_start(uint32_t cycles, uint32_t gap_ms)
+{
+	stress_remaining = MIN(cycles, 200);
+	stress_gap_ms = CLAMP(gap_ms, 500, 30000);
+	LOG_WRN("stress: starting %u re-attach cycles, gap %u ms",
+		stress_remaining, stress_gap_ms);
+	/* Delay the first cycle so the SMP response reaches the host before
+	 * the connection is torn down. */
+	k_work_reschedule(&stress_work, K_MSEC(500));
+}

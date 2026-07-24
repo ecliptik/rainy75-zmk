@@ -38,11 +38,12 @@
 
 LOG_MODULE_REGISTER(flash_mgmt, LOG_LEVEL_INF);
 
-#define FLASH_MGMT_ID_ERASE    0
-#define FLASH_MGMT_ID_WRITE    1
-#define FLASH_MGMT_ID_READ     2
-#define FLASH_MGMT_ID_COMMIT   3
-#define FLASH_MGMT_ID_USB_DIAG 4
+#define FLASH_MGMT_ID_ERASE      0
+#define FLASH_MGMT_ID_WRITE      1
+#define FLASH_MGMT_ID_READ       2
+#define FLASH_MGMT_ID_COMMIT     3
+#define FLASH_MGMT_ID_USB_DIAG   4
+#define FLASH_MGMT_ID_USB_STRESS 5
 
 /* Entries per usb_diag response page; 32 x 8 B = 256 B of CBOR bstr keeps the
  * response inside one SMP netbuf (CONFIG_MCUMGR_TRANSPORT_NETBUF_SIZE=512). */
@@ -457,6 +458,33 @@ static int flash_mgmt_usb_diag(struct smp_streamer *ctxt)
 					n * sizeof(evts[0]));
 	return ok ? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;
 }
+/*
+ * USB stress: trigger the re-enumeration burst that births the CDC wedge.
+ *   write {"n": uint, "gap": uint(ms)}  ->  {"rc": 0}
+ * Response is sent before the first cycle (500 ms delay device-side).
+ */
+static int flash_mgmt_usb_stress(struct smp_streamer *ctxt)
+{
+	zcbor_state_t *zse = ctxt->writer->zs;
+	zcbor_state_t *zsd = ctxt->reader->zs;
+	uint32_t n = 0, gap = 3000;
+	size_t decoded;
+
+	struct zcbor_map_decode_key_val decode_map[] = {
+		ZCBOR_MAP_DECODE_KEY_DECODER("n", zcbor_uint32_decode, &n),
+		ZCBOR_MAP_DECODE_KEY_DECODER("gap", zcbor_uint32_decode, &gap),
+	};
+
+	if (zcbor_map_decode_bulk(zsd, decode_map, ARRAY_SIZE(decode_map),
+				  &decoded) != 0 || n == 0) {
+		return MGMT_ERR_EINVAL;
+	}
+
+	b91_usb_stress_start(n, gap);
+
+	bool ok = zcbor_tstr_put_lit(zse, "rc") && zcbor_int32_put(zse, 0);
+	return ok ? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;
+}
 #endif /* CONFIG_USB_DC_B91 */
 
 static const struct mgmt_handler flash_mgmt_handlers[] = {
@@ -466,6 +494,7 @@ static const struct mgmt_handler flash_mgmt_handlers[] = {
 	[FLASH_MGMT_ID_COMMIT] = { .mh_read = NULL, .mh_write = flash_mgmt_commit },
 #ifdef CONFIG_USB_DC_B91
 	[FLASH_MGMT_ID_USB_DIAG] = { .mh_read = flash_mgmt_usb_diag, .mh_write = NULL },
+	[FLASH_MGMT_ID_USB_STRESS] = { .mh_read = NULL, .mh_write = flash_mgmt_usb_stress },
 #endif
 };
 
