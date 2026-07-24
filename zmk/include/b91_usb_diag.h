@@ -45,3 +45,9 @@ size_t b91_usb_diag_saved(const uint8_t **blob);
  * workqueue cannot be recovered by re-attach — only a reboot rebuilds the
  * thread — so the recovery module escalates accordingly. */
 bool b91_usb_wq_stuck(void);
+
+/* On-demand re-attach stress (flash_mgmt group 64 cmd 5): run `cycles`
+ * usb_disable/usb_enable cycles spaced gap_ms apart, reproducing the
+ * enumeration burst that births the CDC wedge.  Weak no-op in the driver
+ * so builds without the recovery module link. */
+void b91_usb_stress_start(uint32_t cycles, uint32_t gap_ms);
