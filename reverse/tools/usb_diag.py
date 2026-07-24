@@ -86,9 +86,10 @@ def describe(code, a, b):
     if name == "SLOT":
         st = (b >> 8) & 0xFF
         wf = b & 0xFF
-        stname = STATUS_NAMES.get(st, f"status=0x{st:02x}")
-        wfbits = [n for m, n in [(1, "QUEUED"), (2, "RUNNING"),
-                                 (4, "CANCELING"), (16, "DELAYED")] if wf & m]
+        stname = STATUS_NAMES.get(st, f"status=0x{st:02x}(CORRUPT?)")
+        # Zephyr k_work flag bits: RUNNING=1 CANCELING=2 QUEUED=4 DELAYED=8
+        wfbits = [n for m, n in [(1, "RUNNING"), (2, "CANCELING"),
+                                 (4, "QUEUED"), (8, "DELAYED")] if wf & m]
         return (f"SLOT ep=0x{a:02x} {stname} work={'|'.join(wfbits) or 'idle'}")
     if name == "UNCONF":
         return f"UNCONF attached-but-unconfigured {b} ticks -> recovery"
