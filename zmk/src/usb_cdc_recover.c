@@ -112,9 +112,32 @@ static void ring_persist(void)
  * re-formed this quickly after a boot, rebooting again would loop. */
 #define RECOVER_REBOOT_MIN_UPTIME_MS (10 * 60 * 1000)
 
+/* Recovery actions (re-attach, reboot) black out HID for 1-2+ s; fired
+ * mid-typing they eat keystrokes (user-reported regression 2026-07-24).
+ * Wait for a typing pause before acting, bounded so the pulse is never
+ * deferred indefinitely. */
+#define RECOVER_TYPING_PAUSE_MS 10000
+#define RECOVER_MAX_DEFER_MS    120000
+
+static uint32_t defer_total_ms;
+
+static struct k_work_delayable recover_work;
+
 static void recover_work_cb(struct k_work *work)
 {
 	ARG_UNUSED(work);
+
+	int64_t since_key = k_uptime_get() - b91_usb_last_hid_activity();
+
+	if (since_key < RECOVER_TYPING_PAUSE_MS &&
+	    defer_total_ms < RECOVER_MAX_DEFER_MS) {
+		defer_total_ms += 5000;
+		LOG_INF("recovery deferred: user typing %lld ms ago",
+			(long long)since_key);
+		k_work_reschedule(&recover_work, K_MSEC(5000));
+		return;
+	}
+	defer_total_ms = 0;
 
 	ring_persist();
 
@@ -147,7 +170,7 @@ static void recover_work_cb(struct k_work *work)
 	LOG_WRN("CDC recovery re-attach done (rc=%d)", rc);
 }
 
-static K_WORK_DEFINE(recover_work, recover_work_cb);
+static K_WORK_DELAYABLE_DEFINE(recover_work, recover_work_cb);
 
 void b91_usb_cdc_starved(void)
 {
@@ -161,7 +184,7 @@ void b91_usb_cdc_starved(void)
 		return;
 	}
 	last_recover_at = now;
-	k_work_submit(&recover_work);
+	k_work_reschedule(&recover_work, K_NO_WAIT);
 }
 
 /* ------------------------------------------------------------------------

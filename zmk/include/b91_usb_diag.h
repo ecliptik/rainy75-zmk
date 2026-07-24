@@ -56,3 +56,8 @@ void b91_usb_stress_start(uint32_t cycles, uint32_t gap_ms);
  * transfer slots' {ep, status, k_work busy flags}.  Returns slots copied. */
 size_t usb_transfer_slots_snapshot(uint8_t *eps, int8_t *statuses,
 				   uint8_t *wflags, size_t max);
+
+/* Uptime (ms) of the last HID interrupt-IN write — i.e. the user's last
+ * keystroke/report.  Recovery uses it to defer disruptive re-attach/reboot
+ * cycles to a typing pause. */
+int64_t b91_usb_last_hid_activity(void);
