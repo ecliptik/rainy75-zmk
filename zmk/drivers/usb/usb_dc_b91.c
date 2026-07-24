@@ -612,16 +612,23 @@ static void suspend_poll_cb(struct k_work *work)
 			}
 		}
 		unconf_ticks = 0;
-	} else if (state.attached && !state.suspended &&
+	} else if (state.attached && !state.suspended && !quiet &&
 		   !(usb_read8(B91_USB_HOST_CONN) &
 		     B91_USB_HOST_CONN_CONFIGURED)) {
-		/* Catch-all rung: attached with the pull-up presented but the
-		 * host never (re)configured us — a failed recovery cycle can
-		 * park the device here, outside the starvation gate above,
-		 * with even HID dead (observed 2026-07-23: stress wedge +
-		 * failed re-attach needed a physical replug).  The fork's
-		 * reattach watchdog normally handles a dead bus; this fires
-		 * only if that also fails for 2 minutes straight. */
+		/* Catch-all rung: an ACTIVE host (bus traffic this tick) is
+		 * talking to us but leaving us unconfigured — a failed
+		 * recovery cycle can park the device here, outside the
+		 * starvation gate above, with even HID dead (observed
+		 * 2026-07-23: stress wedge + failed re-attach needed a
+		 * physical replug).
+		 *
+		 * The !quiet gate is load-bearing: attached-but-unconfigured
+		 * with a SILENT bus is the normal indefinite state of a
+		 * keyboard on a dock whose upstream host is away — recovery
+		 * cycling (let alone reboot) there turned into a reboot loop
+		 * that poisoned the host's next enumeration (2026-07-24 dock
+		 * regression).  A silent bus belongs to the fork's reattach
+		 * watchdog and its exponential backoff, not to us. */
 		out_unarmed_ticks = 0;
 		out_starve_fired = false;
 		if (unconf_ticks < UINT16_MAX) {
