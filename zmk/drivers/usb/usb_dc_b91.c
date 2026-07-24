@@ -408,6 +408,12 @@ static uint8_t diag_bulk_out_ep;   /* CDC bulk OUT EP number (5 or 6), 0 = none 
 static uint16_t out_unarmed_ticks;
 static bool out_starve_fired;
 static uint16_t unconf_ticks;      /* attached-but-unconfigured catch-all */
+static int64_t last_int_in_write_ms; /* last HID interrupt-IN write (typing) */
+
+int64_t b91_usb_last_hid_activity(void)
+{
+	return last_int_in_write_ms;
+}
 
 /* USB workqueue liveness probe.  All usb_transfer completions run on the
  * dedicated z_usb_work_q thread; if that thread dies (stack overflow, fault)
@@ -1436,6 +1442,13 @@ int usb_dc_ep_write(const uint8_t ep, const uint8_t *const data,
 	 * "Set Configuration will set BIT(7) to 1." */
 	if (!(usb_read8(B91_USB_HOST_CONN) & B91_USB_HOST_CONN_CONFIGURED)) {
 		return -ENODEV;
+	}
+
+	/* Track interrupt-IN traffic (HID reports = the user typing) so the
+	 * recovery module can defer disruptive re-attach/reboot cycles to a
+	 * typing pause instead of eating keystrokes mid-sentence. */
+	if (state.ep[n].type == USB_DC_EP_INTERRUPT) {
+		last_int_in_write_ms = k_uptime_get();
 	}
 
 	/* Data EP IN: wait for endpoint to become free.
