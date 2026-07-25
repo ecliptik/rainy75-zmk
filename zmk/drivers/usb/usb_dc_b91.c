@@ -117,6 +117,14 @@ enum b91_usb_diag_code {
 				 * bit1: node actually in that queue's pending
 				 * list, bit2: queue ptr non-NULL. bit1 clear
 				 * with bit0 set = flag/list divergence */
+	B91_DIAG_WAKE_REQ = 18, /* remote-wakeup resume pulse driven on the
+				 * suspended bus (usb_dc_wakeup_request) */
+	B91_DIAG_SUSP_POLL = 19, /* suspend-ish poll tick: a bit0 = SUSPEND_O
+				  * latched, bit1 = MDEV live suspend level,
+				  * bit2 = quiet, bit3 = configured; b = ISR
+				  * events since previous tick. Logged on
+				  * transitions while not yet suspended —
+				  * shows which gate blocks detection. */
 };
 
 static __noinit struct {
@@ -650,8 +658,21 @@ static void suspend_poll_cb(struct k_work *work)
 	 * the ZMK re-attach watchdog tear down a healthy connection. */
 	uint32_t ev = state.isr_events;
 	bool quiet = (ev == poll_last_isr_events);
+	uint32_t ev_delta = ev - poll_last_isr_events;
 
 	poll_last_isr_events = ev;
+
+	/* Live bus-suspend level (read-only MDEV bit, no latch to race) and
+	 * the hardware's configured state. The latched SUSPEND_O path below
+	 * proved racy on hardware: it missed two real host sleeps in a row
+	 * (armed remote-wakeup cycles, 2026-07-25) because the bit was
+	 * cleared/not re-asserted by poll time. The level cannot be missed —
+	 * it stays set for as long as the bus is suspended. Gated on
+	 * CONFIGURED because the level is also set during the idle gap that
+	 * precedes every enumeration. */
+	bool susp_level = usb_read8(B91_USB_MDEV) & B91_USB_MDEV_SUSP_STA;
+	bool hw_configured = usb_read8(B91_USB_HOST_CONN) &
+			     B91_USB_HOST_CONN_CONFIGURED;
 
 	if (bits != poll_last_bits) {
 		/* Diagnostic: trace status-bit behaviour (latch/re-assert
@@ -671,10 +692,23 @@ static void suspend_poll_cb(struct k_work *work)
 		usb_write8(B91_USB_IRQ_MASK, (irq_mask_reg & 0x07) | bits);
 	}
 
-	if ((bits & B91_USB_IRQ_SUSPEND_O) && quiet && !state.suspended) {
+	/* Trace suspend-gate transitions while not suspended: which signals
+	 * are up, and which gate blocks. One event per state change only. */
+	static uint8_t susp_poll_last;
+	uint8_t susp_now = ((bits & B91_USB_IRQ_SUSPEND_O) ? 1 : 0) |
+			   (susp_level ? 2 : 0) | (quiet ? 4 : 0) |
+			   (hw_configured ? 8 : 0);
+	if (!state.suspended && (susp_now & 0x3) && susp_now != susp_poll_last) {
+		diag_ev(B91_DIAG_SUSP_POLL, susp_now,
+			(uint16_t)MIN(ev_delta, UINT16_MAX));
+	}
+	susp_poll_last = susp_now;
+
+	if (((bits & B91_USB_IRQ_SUSPEND_O) || (susp_level && hw_configured)) &&
+	    quiet && !state.suspended) {
 		state.suspended = true;
 		LOG_DBG("USB bus idle; reporting SUSPEND");
-		diag_ev(B91_DIAG_STATUS, USB_DC_SUSPEND, 0);
+		diag_ev(B91_DIAG_STATUS, USB_DC_SUSPEND, susp_now);
 		if (state.status_cb) {
 			state.status_cb(USB_DC_SUSPEND, NULL);
 		}
@@ -950,8 +984,35 @@ void usb_dc_set_status_callback(const usb_dc_status_callback cb)
 
 int usb_dc_wakeup_request(void)
 {
-	LOG_WRN("Remote wakeup not implemented");
-	return -ENOTSUP;
+	/* Drive whenever attached, without consulting our own suspend state:
+	 * Zephyr only calls this once the host has armed DEVICE_REMOTE_WAKEUP
+	 * (SET_FEATURE), and the callers fire when the link is already dead to
+	 * the user.  Suspend *detection* is not dependable across host sleep
+	 * flavors — two armed Linux sleeps delivered neither the latched
+	 * SUSPEND_O bit nor an MDEV suspend level, and a detection-gated pulse
+	 * simply never fired (2026-07-25).
+	 *
+	 * The ring records the bus state at the instant of the pulse so a
+	 * capture can still say what the hardware believed: a = state bits,
+	 * b = raw IRQ status/level register.
+	 */
+	uint8_t irq_reg = usb_read8(B91_USB_IRQ_MASK);
+	bool susp_level = usb_read8(B91_USB_MDEV) & B91_USB_MDEV_SUSP_STA;
+
+	diag_ev(B91_DIAG_WAKE_REQ,
+		(state.attached ? 1 : 0) | (state.suspended ? 2 : 0) |
+		(susp_level ? 4 : 0), irq_reg);
+
+	if (!state.attached) {
+		return -ENODEV;
+	}
+
+	LOG_INF("driving USB resume signaling (remote wakeup)");
+
+	sys_write8(B91_WAKEUP_USB_RESUME, B91_REG_WAKEUP_EN);
+	sys_write8(B91_WAKEUP_USB_PWDN, B91_REG_WAKEUP_EN);
+
+	return 0;
 }
 
 /* ========================================================================== *
@@ -1060,11 +1121,13 @@ static void usb_dc_b91_isr(const void *arg)
 			(uint16_t)((state.ep[0].buf[7] << 8) | state.ep[0].buf[6]));
 
 		/* Trace enumeration-shaping STANDARD requests only (SET_ADDRESS,
-		 * SET_CONFIGURATION, SET_INTERFACE) — GET_DESCRIPTOR bursts would
-		 * flood the 64-entry ring, and class requests share bRequest
-		 * values (HID SET_REPORT is also 9). */
+		 * SET_CONFIGURATION, SET_INTERFACE, and CLEAR/SET_FEATURE for
+		 * remote-wakeup arming) — GET_DESCRIPTOR bursts would flood the
+		 * 64-entry ring, and class requests share bRequest values (HID
+		 * SET_REPORT is also 9). */
 		if ((state.ep[0].buf[0] & 0x60) == 0 &&
-		    (state.ep[0].buf[1] == 5 || state.ep[0].buf[1] == 9 ||
+		    (state.ep[0].buf[1] == 1 || state.ep[0].buf[1] == 3 ||
+		     state.ep[0].buf[1] == 5 || state.ep[0].buf[1] == 9 ||
 		     state.ep[0].buf[1] == 11)) {
 			diag_ev(B91_DIAG_SETUP, state.ep[0].buf[1],
 				(uint16_t)((state.ep[0].buf[3] << 8) |

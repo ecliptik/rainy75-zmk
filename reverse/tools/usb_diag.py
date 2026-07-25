@@ -38,11 +38,14 @@ CODES = {
     9: "WQ_STUCK",
     10: "WQ_STATE",
     11: "WQ_PEND2",
+    12: "WQ_QSTAT",
     13: "SLOT",
     14: "UNCONF",
     15: "WSTALL",
     16: "WDETAIL",
     17: "WQPTR",
+    18: "WAKE_REQ",
+    19: "SUSP_POLL",
 }
 
 # Low byte of the slot's int status. Values are THIS libc's errno numbers
@@ -61,7 +64,8 @@ STATUS = {0: "ERROR", 1: "RESET", 2: "CONNECTED", 3: "CONFIGURED",
           4: "DISCONNECTED", 5: "SUSPEND", 6: "RESUME", 7: "INTERFACE",
           8: "SET_HALT", 9: "CLEAR_HALT", 10: "SOF", 11: "UNKNOWN"}
 
-SETUP_REQ = {5: "SET_ADDRESS", 9: "SET_CONFIGURATION", 11: "SET_INTERFACE"}
+SETUP_REQ = {1: "CLEAR_FEATURE", 3: "SET_FEATURE", 5: "SET_ADDRESS",
+             9: "SET_CONFIGURATION", 11: "SET_INTERFACE"}
 
 
 def describe(code, a, b):
@@ -84,6 +88,21 @@ def describe(code, a, b):
         return f"STARVED ep={a & 0x7F} ({how}) after {b} ticks ({b // 2}s) -> recovery hook"
     if name == "DETACH":
         return "DETACH"
+    if name == "WAKE_REQ":
+        # bit0 attached (and therefore driven), bit1 driver suspend flag,
+        # bit2 live MDEV suspend level. b = raw IRQ status/level register.
+        att = "attached" if a & 1 else "DETACHED"
+        sus = "susp-flag" if a & 2 else "no-flag"
+        lvl = "susp-level" if a & 4 else "no-level"
+        drove = " -> RESUME PULSE DRIVEN" if a & 1 else " -> refused (detached)"
+        irqb = [n for m, n in [(0x80, "SUSPEND_O"), (0x40, "250US_O"),
+                               (0x10, "250US_LVL"), (0x08, "RESET_LVL")]
+                if b & m]
+        return f"WAKE_REQ ({att}, {sus}, {lvl}; irq={'|'.join(irqb) or 'none'}){drove}"
+    if name == "SUSP_POLL":
+        sigs = [n for m, n in [(1, "SUSPEND_O"), (2, "mdev-level"),
+                               (4, "quiet"), (8, "configured")] if a & m]
+        return f"SUSP_POLL {'|'.join(sigs) or 'none'} isr_delta={b}"
     if name == "WQ_STATE":
         # thread_state bits (kernel_structs.h): 1=dummy 2=pending 4=prestart
         # 8=dead 16=suspended 32=aborting 128=queued

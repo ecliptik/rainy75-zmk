@@ -779,6 +779,43 @@ On top of the DC layer:
 
 A new-API UDC driver (`udc_b91.c`) is also present for future use when ZMK migrates to `USB_DEVICE_STACK_NEXT`. The legacy `usb_dc.h` API is deprecated in Zephyr, with removal targeted for Zephyr 4.5 (~Oct 2026). ZMK upstream is working on migration.
 
+### USB Remote Wakeup
+
+The B91 can drive real resume signaling, so a keypress wakes a sleeping host without re-enumerating. `usb_dc_wakeup_request()` pulses the `WAKEUPEN` system register (`0x801401ee`, SC_BASE + 0x2e): the USB resume bit, then the USB-suspend wakeup source bit. This is the recipe Telink's public SDK uses in `usb_hardware_remote_wakeup()` (`tl_ble_sdk`, `drivers/B91/usbhw.c`). The datasheet lists "support remote wakeup" as a suspend-mode feature but documents no bit for driving it, and the MDEV wakeup-feature bit is read-only, so the SDK is the reference.
+
+Enabled with `CONFIG_USB_DEVICE_REMOTE_WAKEUP=y` (`conf/app.conf`). Zephyr then sets the descriptor's remote-wakeup attribute, tracks the host's `SET_FEATURE(DEVICE_REMOTE_WAKEUP)`, and refuses `usb_wakeup_request()` with `-EACCES` until the host has armed it. ZMK asks for a wakeup from the HID send path and falls back to re-presenting the device only if the request is refused or a wakeup already driven did not resume the bus (`patches/zmk-src/0004`).
+
+Verified against a sleeping Linux host, keypress as the only input:
+
+```
+SETUP SET_FEATURE wValue=1                 host arms remote wakeup as it sleeps
+WAKE_REQ -> RESUME PULSE DRIVEN            keypress
+STATUS SUSPEND
+WAKE_REQ (susp-flag, susp-level) -> RESUME PULSE DRIVEN
+STATUS RESUME                              host resumed the bus
+SETUP CLEAR_FEATURE wValue=1               host disarms after waking
+```
+
+No `DETACH`, no `SET_CONFIGURATION`, and the kernel's device number is unchanged across the cycle — a true resume, not a re-presentation. Read this back with `reverse/tools/usb_diag.py` (ring event codes 18 `WAKE_REQ` and 19 `SUSP_POLL`).
+
+**Do not gate the pulse on suspend detection.** The first `WAKE_REQ` above fired with neither the latched `SUSPEND_O` bit nor the MDEV suspend level set, about 400 ms before the driver's poll recognised the suspend; two other armed sleeps produced no suspend indication at all. The driver therefore pulses whenever it is attached and leaves the policy gate to Zephyr's `SET_FEATURE` tracking. Suspend *detection* was separately improved to consult the live MDEV suspend level (gated on CONFIGURED) instead of only the latched status bit, which is racy.
+
+**Host-side arming (Linux).** All of these are required, and nothing wakes the machine if any is missing. The per-device setting resets on every replug and every DFU cycle:
+
+```bash
+echo enabled > /sys/bus/usb/devices/usb3/power/wakeup   # root hub (often disabled by default)
+echo enabled > /sys/bus/usb/devices/3-1/power/wakeup    # the keyboard
+grep XHCI /proc/acpi/wakeup                             # must be *enabled
+```
+
+Make it persistent with a udev rule:
+
+```
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="615e", ATTR{power/wakeup}="enabled"
+```
+
+Runtime autosuspend (`power/control=auto`) is not a usable test vehicle here: the host never idles the port, most likely because of the CDC console's own traffic. Use a full system suspend. Note also that the keypress only reaches the USB path when the active ZMK endpoint is USB (`Fn+F4` toggles); over BLE no wakeup is requested.
+
 ## RGB LED Strip Driver
 
 WS2812 LED strip driver via Telink B91 PSPI + DMA. All register sequences from decompiled original firmware (`secondary_pipeline`, `hid_report_build`).
@@ -916,14 +953,24 @@ patches/
     0001-gpio-b91-fix-WRITE_BIT-double-BIT.patch
     0002-gpio-b91-fix-interrupt-support.patch
     0003-flash-b91-report-erase-sectors.patch
-    0004-soc-tlsr951x-select-HAS_POWEROFF-for-deep-sleep-supp.patch
+    0004-usb-device-fix-transfer-slot-leak-on-cancel-resubmit.patch
+    0005-usb-cdc_acm-retry-RX-transfer-restart-instead-of-dro.patch
+    0006-usb-device-add-transfer-slot-diagnostic-snapshot.patch
+    0007-usb-device-reclaim-transfer-slots-whose-completion-n.patch
+    0008-usb-device-expose-a-transfer-slot-s-work-item-for-di.patch
+    0009-usb-device-do-not-re-init-transfer-slots-on-every-us.patch
   mcuboot/
     0001-b91-riscv-boot-fixes.patch
   hal_telink/
     0001-exclude-sys-for-BT_HCI_B91.patch
+  zmk-src/
+    0001-zmk-usb-no-vbus-detect.patch
+    0002-zmk-recover-a-dead-USB-bus-while-suspended-no-VBUS-d.patch
+    0003-zmk-don-t-re-attach-USB-during-the-host-s-HID-bind-w.patch
+    0004-zmk-drive-USB-remote-wakeup-from-the-HID-send-path.patch
 ```
 
-### Zephyr (4 files, 4 patches)
+### Zephyr (4 files, 9 patches)
 
 **`drivers/gpio/gpio_b91.c`** — WRITE_BIT double-BIT fix **[VERIFIED]**
 
@@ -987,11 +1034,17 @@ TLSR951x supports `sys_poweroff()` via deep retention sleep, but upstream never 
 
 BLE controller blob defines `sys_init()`, collides with hal_telink's `sys.c`. Required when `CONFIG_BT_HCI_B91=y`.
 
-### zmk-src (1 file, 1 patch)
+### zmk-src (3 files, 4 patches)
 
-**`app/Kconfig` + `app/src/activity.c`** — `ZMK_USB_NO_VBUS_DETECT` for boards without VBUS sensing
+**0001 — `app/Kconfig` + `app/src/activity.c`** — `ZMK_USB_NO_VBUS_DETECT` for boards without VBUS sensing
 
 B91 has no USB VBUS detection pin. Without this patch, `is_usb_power_present()` returns true (USB status stays at SUSPEND after unplug), preventing deep sleep from ever triggering. When `CONFIG_ZMK_USB_NO_VBUS_DETECT=y`, `is_usb_power_present()` always returns false, allowing the idle sleep timeout to work.
+
+**0002 — `app/src/usb.c`** — dead-bus heartbeat: re-present the device when the bus is provably dead while suspended (no VBUS detect means cable removal is invisible, so a returning host's bus reset can be missed).
+
+**0003 — `app/src/usb.c`** — bind-window grace: failed HID sends within 5 s of a completed enumeration no longer count toward the starvation verdict, so an ordinary wake does not trigger a second, needless re-attach. From PR #20.
+
+**0004 — `app/src/usb_hid.c`** — ask for USB remote wakeup from the HID send path, falling back to re-presenting only when the request is refused or a driven wakeup did not resume the bus. See [USB Remote Wakeup](#usb-remote-wakeup).
 
 ### Reverted fixes (proven unnecessary)
 
