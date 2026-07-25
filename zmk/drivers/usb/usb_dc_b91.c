@@ -570,8 +570,12 @@ static void wstall_capture_details(void)
 			bits |= BIT(0);
 		}
 
-		/* Walk the queue's pending list looking for this node. */
+		/* Walk the queue's pending list looking for this node, with
+		 * interrupts locked: the work module manipulates this list from
+		 * ISR context, so an unlocked walk could follow a node while it
+		 * is being relinked. */
 		sys_snode_t *node;
+		unsigned int key = irq_lock();
 
 		SYS_SLIST_FOR_EACH_NODE(&z_usb_work_q.pending, node) {
 			if (node == &w->node) {
@@ -579,6 +583,7 @@ static void wstall_capture_details(void)
 				break;
 			}
 		}
+		irq_unlock(key);
 
 		diag_ev(B91_DIAG_WQPTR, (uint8_t)i, bits);
 	}
