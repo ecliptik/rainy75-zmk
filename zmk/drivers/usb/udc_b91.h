@@ -203,6 +203,21 @@
 #define B91_ANALOG_TX_BUFCNT       0xF0    /* bits 4-7: TX buffer count */
 
 /* ---------------------------------------------------------------------------
+ * WAKEUPEN — system control register (SC_BASE 0x1401c0 + 0x2e)
+ *
+ * Writing the USB resume bit makes the controller drive resume signaling on a
+ * suspended bus, i.e. real USB remote wakeup.  Telink's SDK pulses it the same
+ * way in usb_hardware_remote_wakeup() (tl_ble_sdk drivers/B91/usbhw.c): set
+ * the resume bit, then restore the register to the USB-suspend wakeup source.
+ * The datasheet lists "support remote wakeup" as a feature but documents no
+ * bit for driving it, so the SDK is the reference here.
+ * --------------------------------------------------------------------------- */
+
+#define B91_REG_WAKEUP_EN          0x801401eeUL
+#define B91_WAKEUP_USB_PWDN        BIT(0)  /* USB suspend as a wakeup source */
+#define B91_WAKEUP_USB_RESUME      BIT(2)  /* drive resume signaling (w) */
+
+/* ---------------------------------------------------------------------------
  * GPIO Registers for USB Pin Setup (PA5=DM, PA6=DP)
  *
  * Register layout (from SDK gpio_reg.h):

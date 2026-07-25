@@ -1,0 +1,95 @@
+From 15818c1989bf5cd0d5e7a3d4182555e3b4d228d7 Mon Sep 17 00:00:00 2001
+From: scholzri <33288574+scholzri@users.noreply.github.com>
+Date: Sat, 25 Jul 2026 13:17:28 +0200
+Subject: [PATCH] zmk: drive USB remote wakeup from the HID send path
+
+zmk_usb_hid_send_report() already asks for a wakeup when the endpoint
+status is SUSPEND. Two gaps showed up on hardware (Telink B91):
+
+  - The status is not always SUSPEND when the host is asleep. Some host
+    sleep flavors leave the device without a clean suspend indication,
+    so the request was never issued and the fork fell back to
+    re-presenting the device (a full re-enumeration, ~0.6 s of dead HID
+    plus the keystrokes typed into it).
+  - A wakeup that does not take needs a fallback, but re-presenting
+    immediately defeats the wakeup that may still be in flight.
+
+Ask for the wakeup first and re-present only when it is refused (the
+host never armed DEVICE_REMOTE_WAKEUP, so Zephyr answers -EACCES) or
+when a wakeup driven moments ago demonstrably did not resume the bus.
+Also request one when an interrupt IN write fails while configured: a
+host that stopped draining the endpoint after arming remote wakeup is
+asleep, whatever the reported status says.
+
+Verified on a Rainy 75 (Telink B91) against a sleeping Linux host: the
+keypress resumes the bus with no DETACH, no SET_CONFIGURATION and an
+unchanged kernel device number.
+
+Signed-off-by: Richard Scholz <33288574+scholzri@users.noreply.github.com>
+---
+ app/src/usb_hid.c | 41 ++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 36 insertions(+), 5 deletions(-)
+
+diff --git a/app/src/usb_hid.c b/app/src/usb_hid.c
+index b4eab790..ac585f31 100644
+--- a/app/src/usb_hid.c
++++ b/app/src/usb_hid.c
+@@ -186,12 +186,27 @@ static const struct hid_ops ops = {
+ 
+ static int zmk_usb_hid_send_report(const uint8_t *report, size_t len) {
+     switch (zmk_usb_get_status()) {
+-    case USB_DC_SUSPEND:
++    case USB_DC_SUSPEND: {
+         // A keypress while suspended is the user asking for the connection
+-        // back: hardware without remote wakeup (B91) re-presents the device
+-        // instead (see the dead-bus heartbeat).
+-        zmk_usb_user_activity_while_suspended();
+-        return usb_wakeup_request();
++        // back. Try true USB remote wakeup first: the driver drives resume
++        // signaling and the host restores the link with no re-enumeration.
++        // Fall back to re-presenting the device (dead-bus heartbeat) when
++        // the request is refused (feature not armed / not supported), or
++        // when a wakeup driven moments ago demonstrably didn't resume the
++        // bus (we are still suspended).
++        static int64_t last_wakeup_req;
++        int64_t now = k_uptime_get();
++        int wake_err = usb_wakeup_request();
++
++        if (wake_err != 0 ||
++            (last_wakeup_req != 0 && (now - last_wakeup_req) < 2000)) {
++            zmk_usb_user_activity_while_suspended();
++        }
++        if (wake_err == 0) {
++            last_wakeup_req = now;
++        }
++        return wake_err;
++    }
+     case USB_DC_ERROR:
+     case USB_DC_RESET:
+     case USB_DC_DISCONNECTED:
+@@ -211,6 +226,22 @@ static int zmk_usb_hid_send_report(const uint8_t *report, size_t len) {
+         // dark-wake enumerations) fails every write with -EAGAIN.
+         zmk_usb_report_send_result(err == 0);
+ 
++        // A failing write with remote wakeup armed means the host stopped
++        // draining the EP after granting us wake permission: drive resume
++        // signaling. Covers host sleeps the suspend detector misses (some
++        // Linux sleep flavors deliver no clean SUSPEND). No-ops with
++        // -EACCES when the host never armed the feature.
++        if (err) {
++            static int64_t last_wake_pulse;
++            int64_t now = k_uptime_get();
++
++            if (now - last_wake_pulse > 1000) {
++                if (usb_wakeup_request() == 0) {
++                    last_wake_pulse = now;
++                }
++            }
++        }
++
+         return err;
+     }
+ }
+-- 
+2.53.0
+
