@@ -1,10 +1,7 @@
-From da3e697521720d939ffa7b841fd15fc7cddbdbc5 Mon Sep 17 00:00:00 2001
+From 91fc712aa24091b48093bd7dad46e331a2854e71 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
-Date: Fri, 24 Jul 2026 22:01:13 -0700
+Date: Sat, 25 Jul 2026 12:10:31 +0200
 Subject: [PATCH] zmk: don't re-attach USB during the host's HID bind window
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
 The dead-bus heartbeat re-attaches a CONFIGURED device after three
 consecutive failed HID sends, on the theory that the host never bound its
@@ -13,25 +10,14 @@ ordinary wake: the host binds its HID driver a moment after
 SET_CONFIGURATION, and a user who just woke the machine is already typing
 before that completes, so those first reports legitimately fail.
 
-Measured on hardware (Telink B91, diagnostic event ring):
-
-  RESUME + DETACH        wake, device re-presents
-  SET_CONFIGURATION      enumerated 530 ms later
-  DETACH                 needless second re-attach, +2.6 s
-  SET_CONFIGURATION      enumerated again
-
-The second cycle blacked out HID for another second and swallowed the
-keystrokes being typed — the typing caused the outage that ate the typing.
-Users saw 'a few seconds' of dead keyboard and several lost characters at
-every wake.
-
 Ignore send failures inside a 5 s grace window after each completed
 enumeration, and drop failures accumulated while the link was down, since
 they say nothing about the fresh enumeration. A genuinely half-enumerated
 binding keeps failing well past the window, so that recovery is delayed,
-not lost — and it is now also backed by the transfer-stall watchdog.
+not lost.
 
-After: one DETACH per wake, device configured 574 ms after RESUME.
+(Regenerated against this tree from ecliptik's PR #20 patch; original
+context assumed LOG_INF where this tree has LOG_DBG.)
 
 Signed-off-by: Micheal Waltz <micheal@ecliptik.com>
 ---
@@ -39,7 +25,7 @@ Signed-off-by: Micheal Waltz <micheal@ecliptik.com>
  1 file changed, 26 insertions(+), 1 deletion(-)
 
 diff --git a/app/src/usb.c b/app/src/usb.c
-index edae4f29..d65877e9 100644
+index 157f4491..13e7b46e 100644
 --- a/app/src/usb.c
 +++ b/app/src/usb.c
 @@ -107,11 +107,26 @@ static K_WORK_DELAYABLE_DEFINE(usb_reattach_work, usb_reattach_work_cb);
@@ -85,8 +71,8 @@ index edae4f29..d65877e9 100644
  
      // Cycle only on a provably dead bus:
      //  - SUSPEND: the controller's idle detector fired (no SOFs for >3 ms) and
-@@ -258,6 +279,10 @@ void usb_status_cb(enum usb_dc_status_code status, const uint8_t *params) {
-         LOG_INF("Suspend from configured: host asleep");
+@@ -255,6 +276,10 @@ void usb_status_cb(enum usb_dc_status_code status, const uint8_t *params) {
+         LOG_DBG("Suspend from configured: host asleep");
      } else if (status == USB_DC_CONFIGURED) {
          host_asleep = false;
 +        // Start the bind grace window, and drop failures accumulated while the
