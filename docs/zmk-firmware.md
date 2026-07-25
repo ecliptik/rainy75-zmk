@@ -808,11 +808,14 @@ echo enabled > /sys/bus/usb/devices/3-1/power/wakeup    # the keyboard
 grep XHCI /proc/acpi/wakeup                             # must be *enabled
 ```
 
-Make it persistent with a udev rule:
+`99-rainy75-zmk.rules` makes both persistent, so install it into `/etc/udev/rules.d/` rather than setting them by hand:
 
 ```
 ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="615e", ATTR{power/wakeup}="enabled"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1d6b", ATTR{power/wakeup}="enabled"
 ```
+
+The second line covers the root hub (`1d6b` is the Linux Foundation root-hub ID). Arming a hub wakes nothing by itself: only a device that is itself armed can.
 
 Runtime autosuspend (`power/control=auto`) is not a usable test vehicle here: the host never idles the port, most likely because of the CDC console's own traffic. Use a full system suspend. Note also that the keypress only reaches the USB path when the active ZMK endpoint is USB (`Fn+F4` toggles); over BLE no wakeup is requested.
 
