@@ -62,6 +62,11 @@ size_t usb_transfer_slots_snapshot(uint8_t *eps, int8_t *statuses,
  * k_work state (flags / owning queue / pending-list membership). */
 struct k_work *usb_transfer_slot_work(size_t idx);
 
+/* Record an event from outside the USB driver (codes >= 32 are reserved for
+ * other subsystems).  The ring is the board's black box: .noinit, readable
+ * over SMP, persisted to NVS at fault time. */
+void b91_usb_diag_note(uint8_t code, uint8_t a, uint16_t b);
+
 /* Uptime (ms) of the last HID interrupt-IN write — i.e. the user's last
  * keystroke/report.  Recovery uses it to defer disruptive re-attach/reboot
  * cycles to a typing pause. */

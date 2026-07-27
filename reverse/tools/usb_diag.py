@@ -46,6 +46,7 @@ CODES = {
     17: "WQPTR",
     18: "WAKE_REQ",
     19: "SUSP_POLL",
+    32: "RGB_STATE",
 }
 
 # Low byte of the slot's int status. Values are THIS libc's errno numbers
@@ -99,6 +100,19 @@ def describe(code, a, b):
                                (0x10, "250US_LVL"), (0x08, "RESET_LVL")]
                 if b & m]
         return f"WAKE_REQ ({att}, {sus}, {lvl}; irq={'|'.join(irqb) or 'none'}){drove}"
+    if name == "RGB_STATE":
+        believed = bool(a & 1)
+        pin_high = bool(a & 16)
+        flags = [n for m, n in [(1, "rail-believed-on"), (2, "idle"),
+                                (4, "host-mode"), (8, "effect-on"),
+                                (16, "PC2-HIGH"), (32, "PC2-out-en"),
+                                (64, "PC2-gpio-mode")] if a & m]
+        verdict = ""
+        if believed and not pin_high:
+            verdict = "  <-- RAIL DIVERGENCE: loop thinks powered, pin is LOW (strip dark)"
+        elif not believed and pin_high:
+            verdict = "  (rail up while loop thinks off — benign)"
+        return f"RGB_STATE {'|'.join(flags) or 'none'} tick={b << 4}{verdict}"
     if name == "SUSP_POLL":
         sigs = [n for m, n in [(1, "SUSPEND_O"), (2, "mdev-level"),
                                (4, "quiet"), (8, "configured")] if a & m]

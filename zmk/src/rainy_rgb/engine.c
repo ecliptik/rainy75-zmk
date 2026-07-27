@@ -1,6 +1,10 @@
 #include <zephyr/kernel.h>
 #include <zephyr/init.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/sys_io.h>
+#if IS_ENABLED(CONFIG_USB_DC_B91)
+#include <b91_usb_diag.h>
+#endif
 #include "engine.h"
 #include "effects.h"
 #include "led_map.h"
@@ -23,6 +27,62 @@ LOG_MODULE_REGISTER(rrgb_engine, CONFIG_LOG_DEFAULT_LEVEL);
 #define RRGB_RAIL_OFF_HOLD_MS 2000
 #define RRGB_RAIL_OFF_TICKS   (RRGB_RAIL_OFF_HOLD_MS / RRGB_PERIOD_MS)
 #define RRGB_RAIL_SETTLE_MS   5
+
+/* --- Black-box instrumentation (B91_DIAG_RGB_STATE) ---------------------
+ * Chasing a dark-strip episode where the firmware was healthy, SMP answered,
+ * host-mode frames were accepted (which overrides the idle blank) and the DMA
+ * never reported a timeout — yet nothing lit, and only a USB resume restored
+ * it.  That combination points at the LED rail being low while the render loop
+ * believed it high: `rail_on` is loop-local state, so anything that drops PC2
+ * behind its back is invisible to it and never re-powered.
+ *
+ * Sample what the loop believes AND what the pin actually reads, and record
+ * every change into the USB diagnostic ring (survives replug on battery,
+ * readable with reverse/tools/usb_diag.py).
+ */
+/* Keepalive cadence is bounded by the ring, not by curiosity: 64 entries
+ * shared with the USB events, so a 5 min tick emits ~96 entries overnight and
+ * wraps away the very divergence the trap exists to catch.  30 min fits a full
+ * night (~16 entries) with room for transitions. */
+#define RRGB_DIAG_KEEPALIVE_TICKS (30 * 60 * RRGB_FPS)  /* ~30 min */
+
+#define RRGB_PC_OEN 0x80140312UL   /* PC output enable (0 = enabled) */
+#define RRGB_PC_OUT 0x80140313UL   /* PC output data */
+#define RRGB_PC_GPIO 0x80140316UL  /* PC GPIO mode enable */
+
+static void rrgb_diag_state(bool rail_believed, bool idle, bool host, bool on)
+{
+#if IS_ENABLED(CONFIG_USB_DC_B91) && IS_ENABLED(CONFIG_LED_STRIP_B91_SPI_PC2_POWER)
+	static uint8_t last_bits = 0xFF;
+	static uint32_t last_tick;
+	static uint32_t ticks;
+
+	uint8_t bits = (rail_believed ? BIT(0) : 0) | (idle ? BIT(1) : 0) |
+		       (host ? BIT(2) : 0) | (on ? BIT(3) : 0);
+
+	if (sys_read8(RRGB_PC_OUT) & BIT(2)) {
+		bits |= BIT(4);
+	}
+	if (!(sys_read8(RRGB_PC_OEN) & BIT(2))) {   /* 0 = output enabled */
+		bits |= BIT(5);
+	}
+	if (sys_read8(RRGB_PC_GPIO) & BIT(2)) {
+		bits |= BIT(6);
+	}
+
+	ticks++;
+	if (bits != last_bits ||
+	    (ticks - last_tick) >= RRGB_DIAG_KEEPALIVE_TICKS) {
+		last_bits = bits;
+		last_tick = ticks;
+		b91_usb_diag_note(32 /* B91_DIAG_RGB_STATE */, bits,
+				  (uint16_t)(ticks >> 4));
+	}
+#else
+	ARG_UNUSED(rail_believed); ARG_UNUSED(idle);
+	ARG_UNUSED(host); ARG_UNUSED(on);
+#endif
+}
 
 /* --- Animation speed model (FPS-independent) ---
  * Ambient effects advance off a shared phase accumulator, NOT the raw frame
@@ -131,10 +191,24 @@ static void rrgb_loop(void *a, void *b, void *c) {
          * host notification pulse still shows when the board is idle. When the
          * option is off, IS_ENABLED() folds idle_off to false — identical behaviour. */
         bool idle_off = IS_ENABLED(CONFIG_RAINY_RGB_IDLE_BLANK) && rt.idle && !host_mode;
+
+        /* Black box: what we believe vs what the pin says (see above). */
+        rrgb_diag_state(rail_on, rt.idle, host_mode, rt.on);
+
         if (!idle_off && (rt.on || host_mode || rrgb_overlay_active(rt.tick))) {
             if (!rail_on) {
                 rrgb_strip_power(true);
                 rail_on = true;
+                k_msleep(RRGB_RAIL_SETTLE_MS);
+            } else if (IS_ENABLED(CONFIG_LED_STRIP_B91_SPI_PC2_POWER) &&
+                       !(sys_read8(RRGB_PC_OUT) & BIT(2))) {
+                /* We think the rail is up but PC2 is low, so every frame we
+                 * render lands on an unpowered strip and nothing lights —
+                 * exactly the dark-strip episode this instrumentation chases.
+                 * The diag event above has already recorded the divergence;
+                 * re-assert the rail so the board recovers on its own. */
+                LOG_WRN("LED rail found low while believed on; re-asserting");
+                rrgb_strip_power(true);
                 k_msleep(RRGB_RAIL_SETTLE_MS);
             }
             render_once();

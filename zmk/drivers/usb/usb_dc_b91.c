@@ -125,6 +125,16 @@ enum b91_usb_diag_code {
 				  * events since previous tick. Logged on
 				  * transitions while not yet suspended —
 				  * shows which gate blocks detection. */
+	/* Codes >= 32 are contributed by other subsystems through
+	 * b91_usb_diag_note(); the ring is simply the board's black box. */
+	B91_DIAG_RGB_STATE = 32, /* rainy_rgb render loop: a = state bits
+				  * (0 rail believed on, 1 idle, 2 host mode,
+				  * 3 effect on, 4 PC2 pin actually high,
+				  * 5 PC2 output enabled, 6 PC2 in GPIO mode);
+				  * b = frame tick >> 4.  Emitted on any change
+				  * and every ~5 min.  Bit 0 set with bit 4
+				  * clear = the loop believes the LED rail is
+				  * powered while the pin says otherwise. */
 };
 
 static __noinit struct {
@@ -184,6 +194,13 @@ size_t b91_usb_diag_snapshot(struct b91_usb_diag_evt *out, size_t skip,
  * un-armed while the host holds us configured) past the threshold.  The app
  * layer overrides this to cycle a USB re-attach; the weak default keeps
  * MCUboot/bridge builds linking without the recovery module. */
+/* Public entry point so other subsystems can record into the same black box
+ * (it is .noinit, SMP-readable and persisted to NVS at fault time). */
+void b91_usb_diag_note(uint8_t code, uint8_t a, uint16_t b)
+{
+	diag_ev(code, a, b);
+}
+
 __weak void b91_usb_cdc_starved(void)
 {
 }
