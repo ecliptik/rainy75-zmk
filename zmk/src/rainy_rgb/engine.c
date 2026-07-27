@@ -208,6 +208,13 @@ static void rrgb_loop(void *a, void *b, void *c) {
                  * The diag event above has already recorded the divergence;
                  * re-assert the rail so the board recovers on its own. */
                 LOG_WRN("LED rail found low while believed on; re-asserting");
+#if IS_ENABLED(CONFIG_USB_DC_B91)
+                /* Durability: the ring wraps in ~a day of keepalives, and a
+                 * cold boot wipes it, so get this divergence into NVS before
+                 * the self-heal erases the only symptom. The diag event was
+                 * recorded earlier this frame, so the snapshot contains it. */
+                b91_usb_diag_persist_async();
+#endif
                 rrgb_strip_power(true);
                 k_msleep(RRGB_RAIL_SETTLE_MS);
             }

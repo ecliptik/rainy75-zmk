@@ -211,6 +211,10 @@ __weak size_t b91_usb_diag_saved(const uint8_t **blob)
 	return 0;
 }
 
+__weak void b91_usb_diag_persist_async(void)
+{
+}
+
 __weak void b91_usb_stress_start(uint32_t cycles, uint32_t gap_ms)
 {
 	ARG_UNUSED(cycles);

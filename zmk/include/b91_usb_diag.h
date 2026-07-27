@@ -62,6 +62,13 @@ size_t usb_transfer_slots_snapshot(uint8_t *eps, int8_t *statuses,
  * k_work state (flags / owning queue / pending-list membership). */
 struct k_work *usb_transfer_slot_work(size_t idx);
 
+/* Persist the ring to NVS now, from any thread (deferred to the system
+ * workqueue, rate limited to once a minute).  For faults found outside the USB
+ * recovery path, which persists on its own — the ring wraps in about a day of
+ * keepalives, and a cold boot wipes .noinit outright.  Weak no-op in the driver
+ * so builds without the recovery module link. */
+void b91_usb_diag_persist_async(void);
+
 /* Record an event from outside the USB driver (codes >= 32 are reserved for
  * other subsystems).  The ring is the board's black box: .noinit, readable
  * over SMP, persisted to NVS at fault time. */
