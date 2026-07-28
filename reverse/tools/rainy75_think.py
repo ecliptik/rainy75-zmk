@@ -3,10 +3,11 @@
 Status indicator for the Rainy 75 (needs CONFIG_RGB_MGMT=y firmware).
 
 Shows what Claude Code is doing on the board, then clears when it's done, and
-flashes when the YubiKey wants a touch. Three looks: a slow orange breathe while
-working, a cyan comet that walks the board (a snake weaving down every row) when
-Claude needs you (a question or an authorization), and a hard green blink while a
-hardware token is waiting on a fingertip.
+flashes when the YubiKey is blocking on you. Three looks: a slow orange breathe
+while working, a cyan comet that walks the board (a snake weaving down every row)
+when Claude needs you (a question or an authorization), and a hard green blink
+while a hardware token waits — for a fingertip if a touch policy is set, or for a
+PIN at a gpg-agent pinentry prompt, which is the common case on a PIN-only key.
 
 MULTIPLE LOCAL SESSIONS share one keyboard, so state is arbitrated, not
 last-writer-wins. Each Claude Code session records its own desired state, keyed
@@ -17,9 +18,9 @@ state across all live sessions:
 
 so one session finishing never clears another's indicator, one session waiting on
 you is never hidden by another that's just working, and a blocked hardware token
-outranks both (it's blocking real work, and it clears in seconds). All state
-changes take an exclusive lock, so concurrent hooks can't race into orphaned
-workers.
+outranks both (it's blocking real work, and it clears the moment you deal with
+it). All state changes take an exclusive lock, so concurrent hooks can't race
+into orphaned workers.
 
 Driven by Claude Code hooks (JSON on stdin):
 
@@ -62,8 +63,10 @@ WORKER_MODE = os.path.join(STATE_DIR, "worker.mode")
 
 # Per-mode look. "think" = slow orange breathe (working, see _run_breathe);
 # "attention" = a cyan comet walking the board (waiting on you, see _run_snake);
-# "touch" = a hard green blink (the YubiKey wants a touch, see _run_blink). The
-# last two use only "color". Priority high -> low.
+# "touch" = a hard green blink (the YubiKey is blocking on you — a fingertip, or a
+# pinentry PIN prompt, see _run_blink). The last two use only "color". The verb
+# stays "touch" because the wrappers and their CLI contract are named for it.
+# Priority high -> low.
 MODES = {
     "think":     {"color": (0xFF, 0x3C, 0x00), "breath": 1.8, "min_f": 0.05},
     "attention": {"color": (0x00, 0xE0, 0xFF)},
@@ -86,10 +89,17 @@ MAX_SECS = 900               # safety: worker auto-stops after 15 min (see _work
 SESSION_TTL = 1800           # prune a session's state after 30 min idle (crash cleanup)
 
 # Per-mode override of SESSION_TTL. A stuck orange is cosmetic, but a stuck green
-# lies about hardware state, so "touch" is pruned aggressively: the window is
-# seconds, and its wrapper clears it from an EXIT trap. This is the backstop for
-# the one case the trap can't cover — the wrapper being SIGKILLed mid-operation.
-MODE_TTL = {"touch": 30}
+# lies about hardware state, so "touch" is pruned far harder than a Claude session.
+#
+# 180 s, not the 30 s this started at. 30 s was sized for a FIDO touch, which the
+# token itself bounds at ~15-30 s — but the wait that actually dominates is a
+# gpg-agent pinentry prompt (the OpenPGP card path, see the scdaemon relay), and
+# that one is unbounded: it sits there until you notice it, which is the entire
+# reason the board lights up. A 30 s cap went dark mid-prompt, precisely when the
+# indicator was doing its job. The relay sends touch-stop itself even when
+# scdaemon dies mid-command, so this only has to backstop the relay being
+# SIGKILLed — 180 s bounds a wedged green without truncating an honest wait.
+MODE_TTL = {"touch": 180}
 
 
 def _worker_secs(mode):
@@ -99,10 +109,10 @@ def _worker_secs(mode):
     give you that: it is only consulted from _live_states(), which only runs when
     a command arrives, so it bounds the *state file* and not the *light*. In the
     exact case it was written for — the wrapper SIGKILLed, so touch-stop never
-    fires — nothing re-arbitrates, and the board would blink on to MAX_SECS, 30x
+    fires — nothing re-arbitrates, and the board would blink on to MAX_SECS, long
     past the point the state was declared untrustworthy. Deriving the worker's
     deadline from the same number retires the light and the state together,
-    without needing anything else to happen.
+    without needing anything else to happen: raise MODE_TTL and the light follows.
     """
     return min(MAX_SECS, MODE_TTL.get(mode, MAX_SECS))
 
