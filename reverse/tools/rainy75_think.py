@@ -2,21 +2,24 @@
 """
 Status indicator for the Rainy 75 (needs CONFIG_RGB_MGMT=y firmware).
 
-Shows what Claude Code is doing on the board, then clears when it's done. Two
-looks: a slow orange breathe while working, and a cyan comet that walks the
-board (a snake weaving down every row) when Claude needs you (a question or an
-authorization).
+Shows what Claude Code is doing on the board, then clears when it's done, and
+flashes when the YubiKey wants a touch. Three looks: a slow orange breathe while
+working, a cyan comet that walks the board (a snake weaving down every row) when
+Claude needs you (a question or an authorization), and a hard green blink while a
+hardware token is waiting on a fingertip.
 
 MULTIPLE LOCAL SESSIONS share one keyboard, so state is arbitrated, not
 last-writer-wins. Each Claude Code session records its own desired state, keyed
 by the session_id the hook passes on stdin. The board shows the highest-priority
 state across all live sessions:
 
-    attention (cyan)  >  think (orange)  >  nothing (clear)
+    touch (green)  >  attention (cyan)  >  think (orange)  >  nothing (clear)
 
-so one session finishing never clears another's indicator, and one session
-waiting on you is never hidden by another that's just working. All state changes
-take an exclusive lock, so concurrent hooks can't race into orphaned workers.
+so one session finishing never clears another's indicator, one session waiting on
+you is never hidden by another that's just working, and a blocked hardware token
+outranks both (it's blocking real work, and it clears in seconds). All state
+changes take an exclusive lock, so concurrent hooks can't race into orphaned
+workers.
 
 Driven by Claude Code hooks (JSON on stdin):
 
@@ -26,10 +29,17 @@ Driven by Claude Code hooks (JSON on stdin):
     Stop / SessionEnd                ->  stop        (this session: done)
     (maintenance)                    ->  reset       (kill all workers + clear)
 
+And by the YubiKey wrappers, which are NOT Claude hooks and pass no stdin (see
+TOUCH_SESSION; rainy75-yubikey wraps ssh-sk-helper for FIDO2/SSH,
+rainy75-yubikey-scd relays Assuan for OpenPGP):
+
+    token op begins                  ->  touch-start (green blink)
+    token op ends / is cancelled     ->  touch-stop  (drop it, re-arbitrate)
+
 Only local sessions drive the board here; the remote-forward paths in the
 rainy75-think wrapper are separate and left alone. Safe by design: no keyboard
--> every command is a no-op, a 15-min worker timeout and `reset` are backstops,
-and the firmware's Fn+RGB escape hatch clears host mode.
+-> every command is a no-op, a 15-min worker timeout, MODE_TTL, and `reset` are
+backstops, and the firmware's Fn+RGB escape hatch clears host mode.
 """
 import fcntl
 import glob
@@ -51,18 +61,34 @@ WORKER_PID = os.path.join(STATE_DIR, "worker.pid")
 WORKER_MODE = os.path.join(STATE_DIR, "worker.mode")
 
 # Per-mode look. "think" = slow orange breathe (working, see _run_breathe);
-# "attention" = a cyan comet walking the board (waiting on you, see _run_snake —
-# only "color" is used for it). Priority high -> low.
+# "attention" = a cyan comet walking the board (waiting on you, see _run_snake);
+# "touch" = a hard green blink (the YubiKey wants a touch, see _run_blink). The
+# last two use only "color". Priority high -> low.
 MODES = {
     "think":     {"color": (0xFF, 0x3C, 0x00), "breath": 1.8, "min_f": 0.05},
     "attention": {"color": (0x00, 0xE0, 0xFF)},
+    "touch":     {"color": (0x6B, 0xFF, 0x00)},   # chartreuse, picked by eye
 }
-PRIORITY = ("attention", "think")
+PRIORITY = ("touch", "attention", "think")
 DEFAULT_MODE = "think"
+
+# A hardware token waiting on a fingertip outranks everything: the operation is
+# blocked until you touch it, it lasts seconds, and unlike the Claude states it
+# is not tied to a session. Driven by the rainy75-yubikey wrappers, which signal
+# touch-start/touch-stop under this fixed pseudo-session id — so the green shows
+# even with no Claude session running, and arbitration restores whatever the
+# board was doing (orange/cyan/nothing) the moment the touch completes.
+TOUCH_SESSION = "yubikey"
 
 STEPS = 16                   # fade steps each direction
 MAX_SECS = 900               # safety: worker auto-stops after 15 min
 SESSION_TTL = 1800           # prune a session's state after 30 min idle (crash cleanup)
+
+# Per-mode override of SESSION_TTL. A stuck orange is cosmetic, but a stuck green
+# lies about hardware state, so "touch" is pruned aggressively: the window is
+# seconds, and its wrapper clears it from an EXIT trap. This is the backstop for
+# the one case the trap can't cover — the wrapper being SIGKILLed mid-operation.
+MODE_TTL = {"touch": 30}
 
 # Notification types that mean "Claude needs you" -> attention. Others
 # (idle_prompt, auth_success, ...) don't light the board.
@@ -202,6 +228,35 @@ def _run_snake(kb, color, stop):
 # Dropped frames tolerated before an animation concludes the link is gone.
 MAX_CONSECUTIVE_MISSES = 5
 
+# "touch" renders as a hard on/off blink of the whole board — deliberately not a
+# breathe. The token is *blocking* an operation, so this has to read as an alarm
+# at the edge of vision and be unmistakable against the smooth orange working
+# glow; a square wave is the least ambiguous signal the board can make.
+# Half-period, so a full cycle is 2x this. Tuned by eye with green_picker.py:
+# 0.175 (~2.9 Hz) was a frantic strobe across 83 keys and 0.35 (~1.4 Hz) was
+# still busy. One blink per second reads as "look at me" without being
+# unpleasant to sit beside for the seconds a touch takes.
+BLINK_DT = 0.5                         # -> 1 Hz
+
+
+def _run_blink(kb, color, stop):
+    on = True
+    black = (0, 0, 0)
+    deadline = time.time() + MAX_SECS
+    misses = 0
+    while not stop["v"] and time.time() < deadline:
+        try:
+            kb.fill(color if on else black)
+            misses = 0
+        except Exception:
+            misses += 1                # a blip is not a dead link (see breathe)
+            if misses >= MAX_CONSECUTIVE_MISSES:
+                break
+            time.sleep(0.2)
+            continue
+        time.sleep(BLINK_DT)
+        on = not on
+
 
 def _run_breathe(kb, params, stop):
     r, g, b = params["color"]
@@ -240,10 +295,17 @@ def _run_breathe(kb, params, stop):
 ACQUIRE_TIMEOUT_S = 25
 ACQUIRE_RETRY_S = 1.0
 
+# "touch" retries far more eagerly: the whole window is a second or two, so a
+# 1 s wait behind a briefly-busy port (TIOCEXCL, previous worker still closing)
+# would show the green only after the touch is already done. Cheap, since these
+# retries only happen while a worker is being replaced.
+ACQUIRE_RETRY_FAST_S = 0.1
+
 
 def _acquire(mode):
     """Open the keyboard, retrying while the port settles after a host wake."""
     deadline = time.time() + ACQUIRE_TIMEOUT_S
+    retry = ACQUIRE_RETRY_FAST_S if mode == "touch" else ACQUIRE_RETRY_S
     client = _load_client()
     while True:
         port = _find_port()
@@ -254,7 +316,7 @@ def _acquire(mode):
                 pass        # busy (another worker), or still enumerating
         if time.time() >= deadline:
             return None
-        time.sleep(ACQUIRE_RETRY_S)
+        time.sleep(retry)
 
 
 def worker(mode):
@@ -268,6 +330,8 @@ def worker(mode):
     try:
         if mode == "attention":
             _run_snake(kb, MODES["attention"]["color"], stop)
+        elif mode == "touch":
+            _run_blink(kb, MODES["touch"]["color"], stop)
         else:
             _run_breathe(kb, MODES.get(mode, MODES[DEFAULT_MODE]), stop)
     finally:
@@ -322,12 +386,16 @@ def _live_states():
             age = now - os.stat(p).st_mtime
         except OSError:
             continue
-        if age > SESSION_TTL:
+        # Read the state before judging its age: the TTL is per-mode (MODE_TTL),
+        # so which deadline applies isn't known until we know what it holds.
+        val = _read_str(p)
+        if val not in MODES:
+            _rm(p)                      # unreadable/garbage -> not a live state
+            continue
+        if age > MODE_TTL.get(val, SESSION_TTL):
             _rm(p)
             continue
-        val = _read_str(p)
-        if val in MODES:
-            states[name] = val
+        states[name] = val
     return states
 
 
@@ -433,6 +501,22 @@ if __name__ == "__main__":
         reset()
         sys.exit(0)
 
+    # The YubiKey verbs are separate from start/stop because they act on the
+    # fixed TOUCH_SESSION rather than the caller's session: a plain "stop" from a
+    # Claude hook must not clear a pending token touch, and vice versa.
+    #
+    # Dispatched BEFORE _hook_input(): these are not Claude hooks and carry no
+    # JSON, and their caller (rainy75-yubikey, wrapping ssh-sk-helper) is handed
+    # a socketpair on stdin by ssh-agent. Reading stdin here would swallow bytes
+    # of the live FIDO protocol. The wrapper also redirects stdin from /dev/null
+    # for defence in depth, but this ordering is what makes it safe by design.
+    if cmd == "touch-start":
+        apply_state(TOUCH_SESSION, "touch")
+        sys.exit(0)
+    if cmd == "touch-stop":
+        apply_state(TOUCH_SESSION, None)
+        sys.exit(0)
+
     hook = _hook_input()
     sid = str(hook.get("session_id") or "cli")
 
@@ -448,6 +532,7 @@ if __name__ == "__main__":
     elif cmd == "stop":
         apply_state(sid, None)
     else:
-        print("usage: rainy75_think.py start|attention|stop|reset  (hook JSON on stdin)",
+        print("usage: rainy75_think.py start|attention|stop|reset  (hook JSON on stdin)\n"
+              "       rainy75_think.py touch-start|touch-stop      (YubiKey; no stdin)",
               file=sys.stderr)
         sys.exit(2)
