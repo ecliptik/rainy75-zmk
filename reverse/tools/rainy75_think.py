@@ -175,10 +175,11 @@ def _run_snake(kb, color, stop):
     shades = [(SNAKE_LEN - k) / SNAKE_LEN for k in range(SNAKE_LEN)]  # head -> tail
     deadline = time.time() + MAX_SECS
     head = 0
+    misses = 0
     try:
         kb.fill((0, 0, 0))             # clean black canvas (enter host mode)
     except Exception:
-        return
+        pass                           # the frame loop below retries
     while not stop["v"] and time.time() < deadline:
         frame = {}
         for k in range(SNAKE_LEN):     # head bright, trail fading
@@ -187,10 +188,19 @@ def _run_snake(kb, color, stop):
         frame[path[(head - SNAKE_LEN) % length]] = (0, 0, 0)   # key leaving the tail
         try:
             kb.set_positions(frame)
+            misses = 0
         except Exception:
-            break
+            misses += 1                # a blip is not a dead link (see breathe)
+            if misses >= MAX_CONSECUTIVE_MISSES:
+                break
+            time.sleep(0.2)
+            continue
         time.sleep(SNAKE_DT)
         head = (head + 1) % length
+
+
+# Dropped frames tolerated before an animation concludes the link is gone.
+MAX_CONSECUTIVE_MISSES = 5
 
 
 def _run_breathe(kb, params, stop):
@@ -199,6 +209,7 @@ def _run_breathe(kb, params, stop):
     ramp = list(range(STEPS + 1)) + list(range(STEPS - 1, -1, -1))
     dt = (params["breath"] / 2) / STEPS
     deadline = time.time() + MAX_SECS
+    misses = 0
     while not stop["v"] and time.time() < deadline:
         for i in ramp:
             if stop["v"]:
@@ -206,19 +217,49 @@ def _run_breathe(kb, params, stop):
             f = min_f + (1.0 - min_f) * (i / STEPS)
             try:
                 kb.fill((int(r * f), int(g * f), int(b * f)))
+                misses = 0
             except Exception:
-                stop["v"] = True
-                break
+                # One dropped frame is not a dead link: a host suspend/resume
+                # or a busy port stalls a request briefly. Only quit once the
+                # link stays unusable, so a blip does not end the animation.
+                misses += 1
+                if misses >= MAX_CONSECUTIVE_MISSES:
+                    stop["v"] = True
+                    break
+                time.sleep(0.2)
+                continue
             time.sleep(dt)
 
 
+# The keyboard is not reachable the instant a host wakes: it re-presents itself
+# and the port re-enumerates, which takes seconds. A worker that gives up on the
+# first failure leaves the board dark until some later hook happens to fire —
+# the "pulse only came back when you ran a command" symptom. Keep trying for
+# long enough to cover a wake, then give up so a genuinely absent keyboard does
+# not leave a process lingering.
+ACQUIRE_TIMEOUT_S = 25
+ACQUIRE_RETRY_S = 1.0
+
+
+def _acquire(mode):
+    """Open the keyboard, retrying while the port settles after a host wake."""
+    deadline = time.time() + ACQUIRE_TIMEOUT_S
+    client = _load_client()
+    while True:
+        port = _find_port()
+        if port:
+            try:
+                return client(port)
+            except Exception:
+                pass        # busy (another worker), or still enumerating
+        if time.time() >= deadline:
+            return None
+        time.sleep(ACQUIRE_RETRY_S)
+
+
 def worker(mode):
-    port = _find_port()
-    if not port:
-        return
-    try:
-        kb = _load_client()(port)
-    except Exception:
+    kb = _acquire(mode)
+    if kb is None:
         return
 
     stop = {"v": False}
