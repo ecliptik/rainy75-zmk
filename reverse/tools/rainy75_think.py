@@ -33,13 +33,13 @@ And by the YubiKey wrappers, which are NOT Claude hooks and pass no stdin (see
 TOUCH_SESSION; rainy75-yubikey wraps ssh-sk-helper for FIDO2/SSH,
 rainy75-yubikey-scd relays Assuan for OpenPGP):
 
-    token op begins                  ->  touch-start (green blink)
-    token op ends / is cancelled     ->  touch-stop  (drop it, re-arbitrate)
+    token op begins                  ->  touch-start (green blink; refcounted)
+    token op ends / is cancelled     ->  touch-stop  (last one out re-arbitrates)
 
 Only local sessions drive the board here; the remote-forward paths in the
 rainy75-think wrapper are separate and left alone. Safe by design: no keyboard
--> every command is a no-op, a 15-min worker timeout, MODE_TTL, and `reset` are
-backstops, and the firmware's Fn+RGB escape hatch clears host mode.
+-> every command is a no-op, a per-mode worker deadline, MODE_TTL, and `reset`
+are backstops, and the firmware's Fn+RGB escape hatch clears host mode.
 """
 import fcntl
 import glob
@@ -77,11 +77,12 @@ DEFAULT_MODE = "think"
 # is not tied to a session. Driven by the rainy75-yubikey wrappers, which signal
 # touch-start/touch-stop under this fixed pseudo-session id — so the green shows
 # even with no Claude session running, and arbitration restores whatever the
-# board was doing (orange/cyan/nothing) the moment the touch completes.
+# board was doing (orange/cyan/nothing) the moment the touch completes. Because
+# they all share the one id, its state is refcounted (see adjust_refcount).
 TOUCH_SESSION = "yubikey"
 
 STEPS = 16                   # fade steps each direction
-MAX_SECS = 900               # safety: worker auto-stops after 15 min
+MAX_SECS = 900               # safety: worker auto-stops after 15 min (see _worker_secs)
 SESSION_TTL = 1800           # prune a session's state after 30 min idle (crash cleanup)
 
 # Per-mode override of SESSION_TTL. A stuck orange is cosmetic, but a stuck green
@@ -89,6 +90,22 @@ SESSION_TTL = 1800           # prune a session's state after 30 min idle (crash 
 # seconds, and its wrapper clears it from an EXIT trap. This is the backstop for
 # the one case the trap can't cover — the wrapper being SIGKILLed mid-operation.
 MODE_TTL = {"touch": 30}
+
+
+def _worker_secs(mode):
+    """How long a worker may run, time spent acquiring the port included.
+
+    A worker must not outlive the state that spawned it. MODE_TTL alone doesn't
+    give you that: it is only consulted from _live_states(), which only runs when
+    a command arrives, so it bounds the *state file* and not the *light*. In the
+    exact case it was written for — the wrapper SIGKILLed, so touch-stop never
+    fires — nothing re-arbitrates, and the board would blink on to MAX_SECS, 30x
+    past the point the state was declared untrustworthy. Deriving the worker's
+    deadline from the same number retires the light and the state together,
+    without needing anything else to happen.
+    """
+    return min(MAX_SECS, MODE_TTL.get(mode, MAX_SECS))
+
 
 # Notification types that mean "Claude needs you" -> attention. Others
 # (idle_prompt, auth_success, ...) don't light the board.
@@ -194,12 +211,11 @@ def _snake_path():
     return path
 
 
-def _run_snake(kb, color, stop):
+def _run_snake(kb, color, stop, deadline):
     path = _snake_path()
     length = len(path)
     r, g, b = color
     shades = [(SNAKE_LEN - k) / SNAKE_LEN for k in range(SNAKE_LEN)]  # head -> tail
-    deadline = time.time() + MAX_SECS
     head = 0
     misses = 0
     try:
@@ -239,10 +255,9 @@ MAX_CONSECUTIVE_MISSES = 5
 BLINK_DT = 0.5                         # -> 1 Hz
 
 
-def _run_blink(kb, color, stop):
+def _run_blink(kb, color, stop, deadline):
     on = True
     black = (0, 0, 0)
-    deadline = time.time() + MAX_SECS
     misses = 0
     while not stop["v"] and time.time() < deadline:
         try:
@@ -258,12 +273,11 @@ def _run_blink(kb, color, stop):
         on = not on
 
 
-def _run_breathe(kb, params, stop):
+def _run_breathe(kb, params, stop, deadline):
     r, g, b = params["color"]
     min_f = params["min_f"]
     ramp = list(range(STEPS + 1)) + list(range(STEPS - 1, -1, -1))
     dt = (params["breath"] / 2) / STEPS
-    deadline = time.time() + MAX_SECS
     misses = 0
     while not stop["v"] and time.time() < deadline:
         for i in ramp:
@@ -295,16 +309,26 @@ def _run_breathe(kb, params, stop):
 ACQUIRE_TIMEOUT_S = 25
 ACQUIRE_RETRY_S = 1.0
 
-# "touch" retries far more eagerly: the whole window is a second or two, so a
-# 1 s wait behind a briefly-busy port (TIOCEXCL, previous worker still closing)
-# would show the green only after the touch is already done. Cheap, since these
-# retries only happen while a worker is being replaced.
+# "touch" retries far more eagerly, and concedes far sooner. The whole window is
+# a second or two, so a 1 s wait behind a briefly-busy port (TIOCEXCL, previous
+# worker still closing) would show the green only after the touch is already
+# done — and holding out for the full 25 s could win the port long after the
+# token stopped waiting, lighting the board for an operation that no longer
+# exists. Retry hard, then give up. Cheap, since these retries only happen while
+# a worker is being replaced.
 ACQUIRE_RETRY_FAST_S = 0.1
+MODE_ACQUIRE_TIMEOUT_S = {"touch": 5}
 
 
-def _acquire(mode):
-    """Open the keyboard, retrying while the port settles after a host wake."""
-    deadline = time.time() + ACQUIRE_TIMEOUT_S
+def _acquire(mode, deadline):
+    """Open the keyboard, retrying while the port settles after a host wake.
+
+    Bounded by this mode's acquire ceiling and by `deadline`, the worker's whole
+    lifetime budget — so a slow acquire eats into the animation rather than
+    extending the worker past the point its state is still believable.
+    """
+    limit = min(deadline, time.time()
+                + MODE_ACQUIRE_TIMEOUT_S.get(mode, ACQUIRE_TIMEOUT_S))
     retry = ACQUIRE_RETRY_FAST_S if mode == "touch" else ACQUIRE_RETRY_S
     client = _load_client()
     while True:
@@ -314,13 +338,15 @@ def _acquire(mode):
                 return client(port)
             except Exception:
                 pass        # busy (another worker), or still enumerating
-        if time.time() >= deadline:
+        if time.time() >= limit:
             return None
         time.sleep(retry)
 
 
 def worker(mode):
-    kb = _acquire(mode)
+    # One budget for the whole worker, acquire included (see _worker_secs).
+    deadline = time.time() + _worker_secs(mode)
+    kb = _acquire(mode, deadline)
     if kb is None:
         return
 
@@ -329,11 +355,11 @@ def worker(mode):
 
     try:
         if mode == "attention":
-            _run_snake(kb, MODES["attention"]["color"], stop)
+            _run_snake(kb, MODES["attention"]["color"], stop, deadline)
         elif mode == "touch":
-            _run_blink(kb, MODES["touch"]["color"], stop)
+            _run_blink(kb, MODES["touch"]["color"], stop, deadline)
         else:
-            _run_breathe(kb, MODES.get(mode, MODES[DEFAULT_MODE]), stop)
+            _run_breathe(kb, MODES.get(mode, MODES[DEFAULT_MODE]), stop, deadline)
     finally:
         try:
             kb.clear()
@@ -372,30 +398,57 @@ def _sess_path(sid):
     return os.path.join(SESS_DIR, safe)
 
 
+def _parse_state(raw):
+    """A state file holds `mode`, or `mode <refcount>` for a refcounted session
+    (see adjust_refcount). Returns (mode, count), or (None, 0) if the file is
+    empty, garbage, or names a mode this version doesn't know."""
+    parts = (raw or "").split()
+    if not parts or parts[0] not in MODES:
+        return None, 0
+    if len(parts) == 1:
+        return parts[0], 1              # plain state == one holder
+    try:
+        count = int(parts[1])
+    except ValueError:
+        return None, 0
+    return (parts[0], count) if count > 0 else (None, 0)
+
+
+def _read_live_state(path):
+    """(mode, refcount) for one session file, or (None, 0) if it is missing,
+    stale, or unparseable — deleting it in the latter two cases.
+
+    Shared by _live_states() and adjust_refcount() so the two can never disagree
+    about what is still live: a refcount inherited from a wrapper that died is
+    exactly as untrustworthy as the mode beside it, and must not be built on.
+    """
+    try:
+        age = time.time() - os.stat(path).st_mtime
+    except OSError:
+        return None, 0
+    # Read the state before judging its age: the TTL is per-mode (MODE_TTL), so
+    # which deadline applies isn't known until we know what the file holds.
+    mode, count = _parse_state(_read_str(path))
+    if mode is None:
+        _rm(path)                       # unreadable/garbage -> not a live state
+        return None, 0
+    if age > MODE_TTL.get(mode, SESSION_TTL):
+        _rm(path)
+        return None, 0
+    return mode, count
+
+
 def _live_states():
     """Read every session's desired state, pruning stale (crashed) ones."""
     states = {}
-    now = time.time()
     try:
         names = os.listdir(SESS_DIR)
     except OSError:
         return states
     for name in names:
-        p = os.path.join(SESS_DIR, name)
-        try:
-            age = now - os.stat(p).st_mtime
-        except OSError:
-            continue
-        # Read the state before judging its age: the TTL is per-mode (MODE_TTL),
-        # so which deadline applies isn't known until we know what it holds.
-        val = _read_str(p)
-        if val not in MODES:
-            _rm(p)                      # unreadable/garbage -> not a live state
-            continue
-        if age > MODE_TTL.get(val, SESSION_TTL):
-            _rm(p)
-            continue
-        states[name] = val
+        mode, _ = _read_live_state(os.path.join(SESS_DIR, name))
+        if mode:
+            states[name] = mode         # arbitration cares about the mode only
     return states
 
 
@@ -448,6 +501,33 @@ def apply_state(sid, state):
             _rm(path)
         else:
             _write(path, state)
+        _drive(_board_mode(_live_states()))
+
+
+def adjust_refcount(sid, mode, delta):
+    """Nest a shared state: +1 to assert it, -1 to release it, the board clearing
+    only once the last holder has let go. Re-arbitrates either way.
+
+    The YubiKey wrappers all signal under one fixed session id (TOUCH_SESSION),
+    because a token touch is system-wide rather than per-session. A bare
+    set/clear would then let whichever operation finished first switch the green
+    off while another was still waiting on a fingertip — a dark board with the
+    token blocked, which is the same lie about hardware the indicator exists to
+    prevent, only inverted. FIDO and OpenPGP reach the key over separate
+    interfaces and genuinely do overlap (an SSH push while a commit is being
+    signed), so the nesting is not hypothetical.
+    """
+    os.makedirs(SESS_DIR, exist_ok=True)
+    with _Lock():
+        path = _sess_path(sid)
+        cur, count = _read_live_state(path)
+        if cur != mode:
+            count = 0       # expired, or another mode's file -> start over at 0
+        count += delta
+        if count > 0:
+            _write(path, f"{mode} {count}")
+        else:
+            _rm(path)       # also covers releasing when nothing is held (no-op)
         _drive(_board_mode(_live_states()))
 
 
@@ -511,10 +591,10 @@ if __name__ == "__main__":
     # of the live FIDO protocol. The wrapper also redirects stdin from /dev/null
     # for defence in depth, but this ordering is what makes it safe by design.
     if cmd == "touch-start":
-        apply_state(TOUCH_SESSION, "touch")
+        adjust_refcount(TOUCH_SESSION, "touch", +1)
         sys.exit(0)
     if cmd == "touch-stop":
-        apply_state(TOUCH_SESSION, None)
+        adjust_refcount(TOUCH_SESSION, "touch", -1)
         sys.exit(0)
 
     hook = _hook_input()
