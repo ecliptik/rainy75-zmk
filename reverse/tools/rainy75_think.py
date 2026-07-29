@@ -3,31 +3,45 @@
 Status indicator for the Rainy 75 (needs CONFIG_RGB_MGMT=y firmware).
 
 Shows what Claude Code is doing on the board, then clears when it's done, and
-flashes when the YubiKey is blocking on you. Three looks: a slow orange breathe
-while working, a cyan comet that walks the board (a snake weaving down every row)
-when Claude needs you (a question or an authorization), and a hard green blink
-while a hardware token waits — for a fingertip if a touch policy is set, or for a
-PIN at a gpg-agent pinentry prompt, which is the common case on a PIN-only key.
+flashes when the YubiKey is blocking on you. Six looks, each a short ENTRANCE
+into a quiet SUSTAIN — because a state that can sit for minutes has to be
+watchable for minutes:
+
+    think      orange breathe                     working
+    attention  cyan comet weaving down every row  needs you (question / auth)
+    touch      chartreuse 1 Hz blink              hardware token waiting
+    error      crimson double flash -> flatline   turn died, go look
+    stalled    gold wipe -> travelling drum       transient API failure, just wait
+    done       emerald burst -> 60 s decaying glow finished
+
+`error` and `stalled` both come from StopFailure, split by what you should do
+about it: a rate limit means wait, a bad credential means get up. Collapsing them
+would cry wolf on the common case. `done`'s glow decays across its minute, so
+brightness reads as "how long ago" — and it retires itself when it reaches black.
 
 MULTIPLE LOCAL SESSIONS share one keyboard, so state is arbitrated, not
 last-writer-wins. Each Claude Code session records its own desired state, keyed
 by the session_id the hook passes on stdin. The board shows the highest-priority
 state across all live sessions:
 
-    touch (green)  >  attention (cyan)  >  think (orange)  >  nothing (clear)
+    touch > attention > error > stalled > think > done > nothing (clear)
 
 so one session finishing never clears another's indicator, one session waiting on
 you is never hidden by another that's just working, and a blocked hardware token
-outranks both (it's blocking real work, and it clears the moment you deal with
-it). All state changes take an exclusive lock, so concurrent hooks can't race
-into orphaned workers.
+outranks everything (it's blocking real work, and it clears the moment you deal
+with it). `attention` outranks `error` deliberately: attention is a LIVE block
+with Claude idling on you, while an error has already stopped. `done` sits at the
+bottom as the only state that asks nothing of you. All state changes take an
+exclusive lock, so concurrent hooks can't race into orphaned workers.
 
 Driven by Claude Code hooks (JSON on stdin):
 
     UserPromptSubmit                 ->  start       (this session: working)
     PostToolUse / PostToolUseFailure ->  start       (resumed working -> orange)
     Notification (permission types)  ->  attention   (this session: needs you)
-    Stop / SessionEnd                ->  stop        (this session: done)
+    StopFailure                      ->  fail        (error_type -> error/stalled)
+    Stop                             ->  done        (finished -> decaying glow)
+    SessionEnd                       ->  stop        (drop this session entirely)
     (maintenance)                    ->  reset       (kill all workers + clear)
 
 And by the YubiKey wrappers, which are NOT Claude hooks and pass no stdin (see
@@ -54,26 +68,40 @@ import sys
 import time
 
 TOOLDIR = os.path.dirname(os.path.abspath(__file__))
+if TOOLDIR not in sys.path:
+    sys.path.insert(0, TOOLDIR)         # `_worker` re-execs this file directly
+import rainy75_anim as anim             # noqa: E402  (needs the path above)
 
 STATE_DIR = os.environ.get("RAINY75_STATE_DIR", "/tmp/rainy75-think")
 SESS_DIR = os.path.join(STATE_DIR, "sessions")
 LOCK = os.path.join(STATE_DIR, "lock")
 WORKER_PID = os.path.join(STATE_DIR, "worker.pid")
 WORKER_MODE = os.path.join(STATE_DIR, "worker.mode")
+# Which Stop the running `done` glow is anchored to. Held separately from
+# worker.mode so the mode comparison in _drive() stays a plain equality test.
+WORKER_ANCHOR = os.path.join(STATE_DIR, "worker.anchor")
 
-# Per-mode look. "think" = slow orange breathe (working, see _run_breathe);
-# "attention" = a cyan comet walking the board (waiting on you, see _run_snake);
-# "touch" = a hard green blink (the YubiKey is blocking on you — a fingertip, or a
-# pinentry PIN prompt, see _run_blink). The last two use only "color". The verb
-# stays "touch" because the wrappers and their CLI contract are named for it.
-# Priority high -> low.
+# Per-mode look. Colours live in rainy75_anim.PALETTE, picked on real hardware
+# with state_picker.py; only the breathe carries extra parameters. The verb for
+# the YubiKey state stays "touch" because the wrappers and their CLI contract are
+# named for it. Priority high -> low.
 MODES = {
-    "think":     {"color": (0xFF, 0x3C, 0x00), "breath": 1.8, "min_f": 0.05},
-    "attention": {"color": (0x00, 0xE0, 0xFF)},
-    "touch":     {"color": (0x6B, 0xFF, 0x00)},   # chartreuse, picked by eye
+    "think":     {"color": anim.PALETTE["think"], "breath": 1.8, "min_f": 0.05},
+    "attention": {"color": anim.PALETTE["attention"]},
+    "touch":     {"color": anim.PALETTE["touch"]},
+    "error":     {"color": anim.PALETTE["error"]},
+    "stalled":   {"color": anim.PALETTE["stalled"]},
+    "done":      {"color": anim.PALETTE["done"]},
 }
-PRIORITY = ("touch", "attention", "think")
+PRIORITY = ("touch", "attention", "error", "stalled", "think", "done")
 DEFAULT_MODE = "think"
+
+# StopFailure error_type -> which state. Transient failures mean "wait, it may
+# retry" and terminal ones mean "get up and deal with it"; one light for both
+# would cry wolf on rate limits, which are the common case by a distance.
+# Anything unrecognised (including a missing error_type, e.g. a forwarded call
+# that carried no stdin) is treated as terminal — the louder, safer default.
+TRANSIENT_ERRORS = {"rate_limit", "overloaded", "server_error"}
 
 # A hardware token waiting on a fingertip outranks everything: the operation is
 # blocked until you touch it, it lasts seconds, and unlike the Claude states it
@@ -99,7 +127,15 @@ SESSION_TTL = 1800           # prune a session's state after 30 min idle (crash 
 # indicator was doing its job. The relay sends touch-stop itself even when
 # scdaemon dies mid-command, so this only has to backstop the relay being
 # SIGKILLed — 180 s bounds a wedged green without truncating an honest wait.
-MODE_TTL = {"touch": 180}
+#
+# `error`/`stalled` are sticky by design — an error you didn't see is an error
+# you'll repeat — but they must still expire, so a crashed session cannot leave a
+# red board forever. 900 s matches MAX_SECS, which means the state file and the
+# light retire at the same moment rather than the light dying first.
+#
+# `done` takes exactly its animation length. The decay and the deadline are the
+# same number by construction: when the glow reaches black the state is gone.
+MODE_TTL = {"touch": 180, "error": 900, "stalled": 900, "done": int(anim.DONE_SECS)}
 
 
 def _worker_secs(mode):
@@ -202,27 +238,12 @@ def _kill(pid):
 # "attention" renders as a comet that walks a serpentine path across the board:
 # row 0 left->right, row 1 right->left, ... down every row, then wraps to the
 # top. SNAKE_LEN keys are lit in a bright-to-dim gradient for fluid motion.
-ROW_LENS = (15, 15, 14, 15, 14, 10)   # Rainy 75 rows, row-major (matches rainy75_rgb)
 SNAKE_LEN = 6
 SNAKE_DT = 0.05                        # seconds per one-key step
 
 
-def _snake_path():
-    """Boustrophedon order over all 83 keys, so the comet weaves down the board
-    and wraps continuously."""
-    path = []
-    pos = 0
-    for i, n in enumerate(ROW_LENS):
-        seg = list(range(pos, pos + n))
-        if i % 2:                      # every other row runs the other way
-            seg.reverse()
-        path.extend(seg)
-        pos += n
-    return path
-
-
 def _run_snake(kb, color, stop, deadline):
-    path = _snake_path()
+    path = anim.snake_path()            # board geometry lives in rainy75_anim
     length = len(path)
     r, g, b = color
     shades = [(SNAKE_LEN - k) / SNAKE_LEN for k in range(SNAKE_LEN)]  # head -> tail
@@ -353,9 +374,46 @@ def _acquire(mode, deadline):
         time.sleep(retry)
 
 
-def worker(mode):
+# --------------------------------------------------------------------------
+# the new states (entrance -> sustain), rendered through rainy75_anim's Canvas
+#
+# The Canvas owns abort and dropped-frame handling for these, so they read as
+# straight-line animation code: it slices every sleep to catch a SIGTERM inside a
+# 5 s flatline gap, and raises Aborted once the link stays unusable. The three
+# older renderers above predate it and keep their own hand-rolled versions.
+# --------------------------------------------------------------------------
+
+def _run_error(kb, color, stop, deadline):
+    cv = anim.Canvas(kb, stop, deadline)
+    anim.flash(cv, color)                              # entrance
+    anim.flatline(cv, color, max(0.0, deadline - time.time()))   # sustain
+
+
+def _run_stalled(kb, color, stop, deadline):
+    cv = anim.Canvas(kb, stop, deadline)
+    anim.wipe(cv, color)                               # entrance
+    anim.drum(cv, color, max(0.0, deadline - time.time()))       # sustain
+
+
+def _run_done(kb, color, stop, deadline, elapsed):
+    cv = anim.Canvas(kb, stop, deadline)
+    if elapsed < 1.0:
+        anim.burst(cv, color)          # entrance — only if we're at the start.
+                                       # Resuming a glow that a higher-priority
+                                       # state hid for 40 s must not re-announce
+                                       # a completion that already happened.
+    anim.glow_decay(cv, color, anim.DONE_SECS, elapsed=elapsed)
+
+
+def worker(mode, elapsed=0.0):
     # One budget for the whole worker, acquire included (see _worker_secs).
-    deadline = time.time() + _worker_secs(mode)
+    # `done` is additionally bounded by whatever is left of its decay window.
+    secs = _worker_secs(mode)
+    if mode == "done":
+        secs = min(secs, max(0.0, anim.DONE_SECS - elapsed))
+        if secs <= 0:
+            return                     # window already closed; nothing to show
+    deadline = time.time() + secs
     kb = _acquire(mode, deadline)
     if kb is None:
         return
@@ -368,8 +426,16 @@ def worker(mode):
             _run_snake(kb, MODES["attention"]["color"], stop, deadline)
         elif mode == "touch":
             _run_blink(kb, MODES["touch"]["color"], stop, deadline)
+        elif mode == "error":
+            _run_error(kb, MODES["error"]["color"], stop, deadline)
+        elif mode == "stalled":
+            _run_stalled(kb, MODES["stalled"]["color"], stop, deadline)
+        elif mode == "done":
+            _run_done(kb, MODES["done"]["color"], stop, deadline, elapsed)
         else:
             _run_breathe(kb, MODES.get(mode, MODES[DEFAULT_MODE]), stop, deadline)
+    except anim.Aborted:
+        pass                           # SIGTERM, deadline, or a dead link
     finally:
         try:
             kb.clear()
@@ -470,6 +536,31 @@ def _board_mode(states):
     return None
 
 
+def _done_anchor():
+    """When the `done` glow started — the mtime of the most recent `done` state.
+
+    Newest wins: if two sessions have finished, brightness should track the one
+    that just did, not the one from 50 s ago. Returns None if nothing is done.
+    """
+    newest = None
+    try:
+        names = os.listdir(SESS_DIR)
+    except OSError:
+        return None
+    for name in names:
+        path = os.path.join(SESS_DIR, name)
+        mode, _ = _read_live_state(path)
+        if mode != "done":
+            continue
+        try:
+            ts = os.stat(path).st_mtime
+        except OSError:
+            continue
+        if newest is None or ts > newest:
+            newest = ts
+    return newest
+
+
 def _drive(target):
     """Make the single worker show `target` (or clear if None)."""
     pid = _read_int(WORKER_PID)
@@ -487,19 +578,34 @@ def _drive(target):
                     pass
         _rm(WORKER_PID)
         _rm(WORKER_MODE)
+        _rm(WORKER_ANCHOR)
         return
 
-    if _alive(pid) and cur == target:
+    # `done` fades in WALL-CLOCK time, not time-on-screen: the decay is anchored
+    # to the Stop that started it, so a glow hidden behind an `attention` for 40 s
+    # resumes with 20 s left rather than restarting bright and claiming the turn
+    # just finished. A newer Stop is a different anchor and does restart it.
+    anchor = _done_anchor() if target == "done" else None
+    anchor_s = "" if anchor is None else "%.3f" % anchor
+    elapsed = 0.0 if anchor is None else max(0.0, time.time() - anchor)
+
+    if _alive(pid) and cur == target and (
+            target != "done" or _read_str(WORKER_ANCHOR) == anchor_s):
         return                          # already showing target -> no flicker
     if _find_port() is None:
         return                          # no keyboard -> no-op
     _kill(pid)                          # replace any worker in the other mode
     p = subprocess.Popen(
-        [sys.executable, os.path.abspath(__file__), "_worker", target],
+        [sys.executable, os.path.abspath(__file__), "_worker", target,
+         "%.3f" % elapsed],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL, start_new_session=True)
     _write(WORKER_PID, str(p.pid))
     _write(WORKER_MODE, target)
+    if target == "done":
+        _write(WORKER_ANCHOR, anchor_s)
+    else:
+        _rm(WORKER_ANCHOR)
 
 
 def apply_state(sid, state):
@@ -585,7 +691,11 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
 
     if cmd == "_worker":
-        worker(sys.argv[2] if len(sys.argv) > 2 else DEFAULT_MODE)
+        try:
+            _elapsed = float(sys.argv[3]) if len(sys.argv) > 3 else 0.0
+        except ValueError:
+            _elapsed = 0.0
+        worker(sys.argv[2] if len(sys.argv) > 2 else DEFAULT_MODE, _elapsed)
         sys.exit(0)
     if cmd == "reset":
         reset()
@@ -619,10 +729,19 @@ if __name__ == "__main__":
         if ntype and ntype not in ATTENTION_NTYPES:
             sys.exit(0)
         apply_state(sid, "attention")
+    elif cmd == "fail":
+        # StopFailure. Claude Code does NOT also fire Stop for a failed turn, so
+        # without this the session stays `think` and the board breathes orange at
+        # a dead turn until MAX_SECS retires it a quarter of an hour later.
+        etype = str(hook.get("error_type") or "")
+        apply_state(sid, "stalled" if etype in TRANSIENT_ERRORS else "error")
+    elif cmd == "done":
+        apply_state(sid, "done")
     elif cmd == "stop":
         apply_state(sid, None)
     else:
-        print("usage: rainy75_think.py start|attention|stop|reset  (hook JSON on stdin)\n"
+        print("usage: rainy75_think.py start|attention|fail|done|stop|reset\n"
+              "                                                   (hook JSON on stdin)\n"
               "       rainy75_think.py touch-start|touch-stop      (YubiKey; no stdin)",
               file=sys.stderr)
         sys.exit(2)
