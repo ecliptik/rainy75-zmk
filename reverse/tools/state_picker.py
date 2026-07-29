@@ -398,9 +398,10 @@ def mode_patterns(kb, color=None):
          lambda: anim.wipe(cv, c)),
         ("drum      (letter keys tapping, hand travels)      [stalled sustain]",
          lambda: anim.drum(cv, c, DRUM_CYCLE_SECS + 4)),
-        ("burst     (expanding ring, fading as it grows)     [done entrance]",
-         lambda: anim.burst(cv, c)),
-        ("glow-decay(dim glow, the fade IS the timer — 12s)  [done sustain]",
+        (f"burst x{anim.DONE_BURSTS}  (expanding rings from one key)      "
+         "[done entrance]",
+         lambda: anim.burst(cv, c, times=anim.DONE_BURSTS)),
+        ("glow-decay(settle, then the fade IS the timer — 12s)[done sustain]",
          lambda: anim.glow_decay(cv, c, 12.0)),
         ("--- not chosen, kept for revisiting ---", None),
         ("glyph  ✓  (check, drawn stroke-by-stroke)",
@@ -465,10 +466,10 @@ def mode_states(kb, colors=None, done_secs=None):
     anim.drum(cv, stl, DRUM_CYCLE_SECS + 4)
     time.sleep(0.8)
 
-    print(f"  st-6  done       burst -> {done_secs:g}s decaying glow       [NEW]",
-          flush=True)
+    print(f"  st-6  done       {anim.DONE_BURSTS} bursts -> settle -> "
+          f"{done_secs:g}s fade   [NEW]", flush=True)
     print("        (the fade is the timer — bright = just finished)", flush=True)
-    anim.burst(cv, dne, center=BOARD_CENTRE)
+    anim.burst(cv, dne, center=BOARD_CENTRE, times=anim.DONE_BURSTS)
     anim.glow_decay(cv, dne, done_secs)
     time.sleep(0.8)
     print()

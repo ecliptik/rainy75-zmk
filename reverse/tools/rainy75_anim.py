@@ -92,6 +92,10 @@ PALETTE = {
 # animation length are the same number by construction.
 DONE_SECS = 60.0
 
+# How many rings `done` fires before settling. Five reads as a celebration
+# rather than an alert — a single ring is over before you look up.
+DONE_BURSTS = 5
+
 # The drumming hand: keys spanned, tap interval, full taps dwelt before moving.
 DRUM_SPAN = 4
 DRUM_DT = 0.11
@@ -304,26 +308,40 @@ def drum(cv, color, secs, span=DRUM_SPAN, dt=DRUM_DT, cycles=DRUM_CYCLES):
     cv.black()
 
 
-def burst(cv, color, center=BOARD_CENTRE, rings=7, dt=0.055):
-    """An expanding ring from one key, fading as it grows."""
+def burst(cv, color, center=BOARD_CENTRE, rings=7, dt=0.055, times=1, gap=0.12):
+    """Expanding rings from one key, fading as they grow. `times` repeats them.
+
+    Repeated from the same centre on purpose: a fixed origin reads as one thing
+    pulsing, where moving it would read as several unrelated events.
+    """
     cr, cc = center
-    for k in range(rings):
-        frame = {}
-        for r in range(NROWS):
-            for c in range(ROW_LENS[r]):
-                if max(abs(r - cr), abs(c - cc)) == k:   # square rings: cheap,
-                    frame[pos(r, c)] = dim(color,        # and reads fine
-                                           1.0 - k / rings)
-        cv.show(frame)
-        cv.sleep(dt)
-    cv.black()
+    for n in range(times):
+        for k in range(rings):
+            frame = {}
+            for r in range(NROWS):
+                for c in range(ROW_LENS[r]):
+                    if max(abs(r - cr), abs(c - cc)) == k:   # square rings: cheap,
+                        frame[pos(r, c)] = dim(color,        # and reads fine
+                                               1.0 - k / rings)
+            cv.show(frame)
+            cv.sleep(dt)
+        cv.black()
+        if gap and n < times - 1:
+            cv.sleep(gap)
 
 
-def glow_decay(cv, color, secs, elapsed=0.0, from_f=0.35, dt=0.5, curve=0.6):
-    """A dim glow decaying to nothing — the fade IS the timer.
+def glow_decay(cv, color, secs, elapsed=0.0, from_f=0.35, dt=0.5, curve=0.6,
+               settle=0.6):
+    """Settle to a dim glow, then decay to nothing — the fade IS the timer.
 
     Brightness says how long ago it finished: bright means just now, faint means
     a while back, dark means the window closed and the state retired itself.
+
+    `settle` ramps the glow up rather than snapping to it. Without it the board
+    goes black at the end of the last burst ring and then pops back on at full
+    glow, which reads as a second, separate event; easing in over half a second
+    makes the bursts and the glow one gesture. The ramp is inside the window, so
+    it costs decay time rather than extending it.
 
     `elapsed` anchors the decay to the ORIGINAL event rather than to worker
     start. If a higher-priority state preempts this one and then clears, the
@@ -336,10 +354,20 @@ def glow_decay(cv, color, secs, elapsed=0.0, from_f=0.35, dt=0.5, curve=0.6):
     linear ramp perceptually vanishes about a third of the way in.
     """
     end = time.time() + max(0.0, secs - elapsed)
+
+    def level():
+        return from_f * ((max(0.0, end - time.time()) / secs) ** curve)
+
+    if settle > 0 and end > time.time():
+        steps = max(1, int(settle / 0.05))
+        for i in range(1, steps + 1):
+            cv.fill(dim(color, level() * (i / steps)))
+            cv.sleep(settle / steps)
+
     while True:
         rem = end - time.time()
         if rem <= 0:
             break
-        cv.fill(dim(color, from_f * ((rem / secs) ** curve)))
+        cv.fill(dim(color, level()))
         cv.sleep(min(dt, rem))
     cv.fill((0, 0, 0))

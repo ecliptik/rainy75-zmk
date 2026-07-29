@@ -397,12 +397,17 @@ def _run_stalled(kb, color, stop, deadline):
 
 def _run_done(kb, color, stop, deadline, elapsed):
     cv = anim.Canvas(kb, stop, deadline)
+    anchor = time.time() - elapsed     # when the Stop actually happened
     if elapsed < 1.0:
-        anim.burst(cv, color)          # entrance — only if we're at the start.
+        anim.burst(cv, color, times=anim.DONE_BURSTS)
+                                       # entrance — only if we're at the start.
                                        # Resuming a glow that a higher-priority
                                        # state hid for 40 s must not re-announce
                                        # a completion that already happened.
-    anim.glow_decay(cv, color, anim.DONE_SECS, elapsed=elapsed)
+    # Re-derive elapsed so the bursts are spent INSIDE the window: `done` must
+    # last DONE_SECS from the Stop, not DONE_SECS plus however long the entrance
+    # took.
+    anim.glow_decay(cv, color, anim.DONE_SECS, elapsed=time.time() - anchor)
 
 
 def worker(mode, elapsed=0.0):
