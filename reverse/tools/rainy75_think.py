@@ -128,14 +128,21 @@ SESSION_TTL = 1800           # prune a session's state after 30 min idle (crash 
 # scdaemon dies mid-command, so this only has to backstop the relay being
 # SIGKILLed — 180 s bounds a wedged green without truncating an honest wait.
 #
-# `error`/`stalled` are sticky by design — an error you didn't see is an error
-# you'll repeat — but they must still expire, so a crashed session cannot leave a
-# red board forever. 900 s matches MAX_SECS, which means the state file and the
-# light retire at the same moment rather than the light dying first.
+# `error`/`stalled` are sticky — an error you didn't see is an error you'll
+# repeat — but they must still expire, so a crashed session cannot leave a red
+# board forever.
+#
+# `error` sits at 120 s: a flatlined board that outstays the moment reads as
+# broken lighting rather than as a signal, and the turn it refers to is already
+# on screen. The cost is real and deliberate — an error that lands while you are
+# away from the desk is gone by the time you return — so if a missed failure
+# ever bites, this is the number to raise. `stalled` stays long: it means the
+# turn may still be retrying, so the light is reporting a live condition rather
+# than a past one.
 #
 # `done` takes exactly its animation length. The decay and the deadline are the
 # same number by construction: when the glow reaches black the state is gone.
-MODE_TTL = {"touch": 180, "error": 900, "stalled": 900, "done": int(anim.DONE_SECS)}
+MODE_TTL = {"touch": 180, "error": 120, "stalled": 900, "done": int(anim.DONE_SECS)}
 
 
 def _worker_secs(mode):
