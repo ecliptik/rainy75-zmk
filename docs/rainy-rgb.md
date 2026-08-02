@@ -141,6 +141,43 @@ the rail. The black frame from `clear_strip()` always goes out while the rail
 is still up. Always on (`CONFIG_LED_STRIP_B91_SPI_PC2_POWER`); the other PC2
 sites are the led_strip driver init (rail on) and `poweroff.c` (deep sleep).
 
+`zmk_adapter.c` owns the pin: `rrgb_strip_power()` drives it and
+`rrgb_strip_rail_state()` samples it, so the register addresses live in one
+place. Powering on re-asserts the whole drive configuration (GPIO mode, output
+enable, level) rather than just the level, which also makes it the recovery
+path for the trap below.
+
+## Rail divergence trap (black box)
+
+`rail_on` in the render loop is loop-local state, so anything that drops PC2
+behind the loop's back is invisible to it: every frame then renders into an
+unpowered strip, which is silent, logless and dark. This was observed once on
+`v0.2.0` (all 83 LEDs dark for hours while the keyboard typed normally, SMP
+answered, and a host-mode fill was accepted with zero light), and it self-healed
+at a USB resume without the board rebooting.
+
+Every frame the loop samples what it believes and what the pin actually reads,
+and records a `B91_DIAG_RGB_STATE` (code 32) event into the USB diagnostic ring
+on any change plus a keepalive. The ring is `.noinit` (so it survives a replug
+on battery), readable over SMP, and persisted to NVS the moment a divergence is
+seen — before the self-heal removes the only symptom:
+
+```bash
+reverse/tools/usb_diag.py            # live ring
+reverse/tools/usb_diag.py --saved    # the copy persisted at fault time
+```
+
+A healthy sample looks like `RGB_STATE rail-believed-on|effect-on|PC2-HIGH|PC2-out-en|PC2-gpio-mode`.
+Belief set with any of the three pin bits clear is flagged as a divergence, and
+the loop re-asserts the rail (~20 ms) so the board recovers on its own.
+
+The keepalive is **30 min**, paced by the ring rather than by curiosity: 64
+entries are shared with the USB events, so a 5 min tick would emit ~96 entries
+overnight and wrap away the very divergence the trap exists to catch.
+
+This is instrumentation plus a defensive self-heal, **not a fix** — the cause
+has not been identified and the fault has not recurred since the trap went in.
+
 ## Config (in `conf/app.conf`)
 
 - `CONFIG_ZMK_RGB_UNDERGLOW=n` (our engine owns the strip)

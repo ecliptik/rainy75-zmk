@@ -84,12 +84,26 @@ void rrgb_strip_show(const struct rrgb *px, uint16_t n) {
 /* PC2 gates LED VCC through a MOSFET (active-high). The led_strip driver
  * configures the pin and powers the rail at init, poweroff.c drops it for
  * deep sleep; here the render loop cuts it while the strip stays dark —
- * a blanked WS2812 still draws ~0.5-1 mA quiescent, ~40-80 mA for 83 LEDs. */
-#define B91_GPIO_PC_OUT 0x80140313UL
+ * a blanked WS2812 still draws ~0.5-1 mA quiescent, ~40-80 mA for 83 LEDs.
+ *
+ * This file owns the pin: everything that drives or samples the rail goes
+ * through rrgb_strip_power() / rrgb_strip_rail_state() so the register
+ * addresses live in exactly one place. */
+#define B91_GPIO_PC_OEN  0x80140312UL   /* output enable, 0 = enabled */
+#define B91_GPIO_PC_OUT  0x80140313UL   /* output data */
+#define B91_GPIO_PC_GPIO 0x80140316UL   /* GPIO mode enable */
 
 void rrgb_strip_power(bool on) {
 #if IS_ENABLED(CONFIG_LED_STRIP_B91_SPI_PC2_POWER)
     if (on) {
+        /* Re-assert the whole drive configuration, not just the level.
+         * Writing the data bit alone only powers the rail if the pin is
+         * still a GPIO output; if anything reconfigured PC2 behind our
+         * back, the strip stays dark and the write looks like it worked.
+         * (The analog input-buffer and pull settings from the driver's
+         * init do not gate the MOSFET, so they are not replayed here.) */
+        sys_write8(sys_read8(B91_GPIO_PC_GPIO) | BIT(2), B91_GPIO_PC_GPIO);
+        sys_write8(sys_read8(B91_GPIO_PC_OEN) & ~BIT(2), B91_GPIO_PC_OEN);
         sys_write8(sys_read8(B91_GPIO_PC_OUT) | BIT(2), B91_GPIO_PC_OUT);
     } else {
         sys_write8(sys_read8(B91_GPIO_PC_OUT) & ~BIT(2), B91_GPIO_PC_OUT);
@@ -97,5 +111,24 @@ void rrgb_strip_power(bool on) {
     LOG_INF("led rail %s", on ? "on" : "off");
 #else
     ARG_UNUSED(on);
+#endif
+}
+
+uint8_t rrgb_strip_rail_state(void) {
+#if IS_ENABLED(CONFIG_LED_STRIP_B91_SPI_PC2_POWER)
+    uint8_t state = 0;
+
+    if (sys_read8(B91_GPIO_PC_OUT) & BIT(2)) {
+        state |= RRGB_RAIL_HIGH;
+    }
+    if (!(sys_read8(B91_GPIO_PC_OEN) & BIT(2))) {   /* 0 = output enabled */
+        state |= RRGB_RAIL_OUT_EN;
+    }
+    if (sys_read8(B91_GPIO_PC_GPIO) & BIT(2)) {
+        state |= RRGB_RAIL_GPIO_MODE;
+    }
+    return state;
+#else
+    return 0;
 #endif
 }

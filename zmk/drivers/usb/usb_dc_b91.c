@@ -132,9 +132,12 @@ enum b91_usb_diag_code {
 				  * 3 effect on, 4 PC2 pin actually high,
 				  * 5 PC2 output enabled, 6 PC2 in GPIO mode);
 				  * b = frame tick >> 4.  Emitted on any change
-				  * and every ~5 min.  Bit 0 set with bit 4
-				  * clear = the loop believes the LED rail is
-				  * powered while the pin says otherwise. */
+				  * and every ~30 min (the keepalive is paced so
+				  * a night of it cannot wrap this 64-entry ring
+				  * past the event it exists to catch).  Bit 0
+				  * set with bit 4 clear = the loop believes the
+				  * LED rail is powered while the pin says
+				  * otherwise. */
 };
 
 static __noinit struct {
@@ -190,10 +193,6 @@ size_t b91_usb_diag_snapshot(struct b91_usb_diag_evt *out, size_t skip,
 	return n;
 }
 
-/* Hook invoked when the CDC bulk OUT endpoint has been starved (enabled but
- * un-armed while the host holds us configured) past the threshold.  The app
- * layer overrides this to cycle a USB re-attach; the weak default keeps
- * MCUboot/bridge builds linking without the recovery module. */
 /* Public entry point so other subsystems can record into the same black box
  * (it is .noinit, SMP-readable and persisted to NVS at fault time). */
 void b91_usb_diag_note(uint8_t code, uint8_t a, uint16_t b)
@@ -201,6 +200,10 @@ void b91_usb_diag_note(uint8_t code, uint8_t a, uint16_t b)
 	diag_ev(code, a, b);
 }
 
+/* Hook invoked when the CDC bulk OUT endpoint has been starved (enabled but
+ * un-armed while the host holds us configured) past the threshold.  The app
+ * layer overrides this to cycle a USB re-attach; the weak default keeps
+ * MCUboot/bridge builds linking without the recovery module. */
 __weak void b91_usb_cdc_starved(void)
 {
 }
