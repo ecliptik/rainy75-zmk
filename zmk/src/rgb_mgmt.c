@@ -11,7 +11,7 @@
  *             normal mode starts from an all-black frame.
  *   1: fill   {"r": uint, "g": uint, "b": uint} -> {"rc": int}
  *   2: clear  {}                            -> {"rc": int}  (back to effects)
- *   3: info   (read)                        -> {"rc": 0, "n": 83, "host": bool}
+ *   3: info   (read)        -> {"rc": 0, "n": 83, "host": bool, "beat": uint}
  *
  * Positions are keymap positions (0..82, ISO row-major) — the engine's
  * led_map translates to physical LED indices, so the same host code works
@@ -117,11 +117,19 @@ static int rgb_mgmt_info(struct smp_streamer *ctxt)
 {
 	zcbor_state_t *zse = ctxt->writer->zs;
 
+	/* "beat" is the render-loop heartbeat: sample info twice and compare. If
+	 * it does not advance, the render thread is dead — the board will accept
+	 * host frames and answer every command while the strip stays dark, so
+	 * this is the only field that distinguishes that state from a working
+	 * one. It counts loop iterations, not drawn frames, so an idle-blanked
+	 * board still beats. */
 	bool ok = zcbor_tstr_put_lit(zse, "rc") && zcbor_int32_put(zse, 0) &&
 		  zcbor_tstr_put_lit(zse, "n") &&
 		  zcbor_uint32_put(zse, RGB_MGMT_POSITIONS) &&
 		  zcbor_tstr_put_lit(zse, "host") &&
-		  zcbor_bool_put(zse, rrgb_host_active());
+		  zcbor_bool_put(zse, rrgb_host_active()) &&
+		  zcbor_tstr_put_lit(zse, "beat") &&
+		  zcbor_uint32_put(zse, rrgb_heartbeat());
 	return ok ? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;
 }
 

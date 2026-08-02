@@ -32,4 +32,8 @@ void rrgb_host_set_pixels(const uint8_t *quads, uint16_t count); /* [pos,r,g,b]*
 void rrgb_host_fill(uint8_t r, uint8_t g, uint8_t b);
 void rrgb_host_clear(void);
 bool rrgb_host_active(void);
+
+/* Render-loop heartbeat: advances once per loop iteration, drawn or not, so a
+ * stalled value means the thread is gone rather than merely idle (see engine.c). */
+uint32_t rrgb_heartbeat(void);
 #endif

@@ -122,6 +122,12 @@ static struct rrgb_runtime rt = {
 static struct rrgb pixels[RRGB_N];
 static uint32_t anim_phase_q8;   /* .8 fixed-point animation phase accumulator */
 
+/* Render-loop liveness beat (see rrgb_heartbeat). Written by the render thread,
+ * read from the mcumgr (SMP) thread; a 32-bit aligned load is atomic on this
+ * core, so volatile without locking is enough — and a torn read would only
+ * misreport one sample of a counter the caller compares across a second. */
+static volatile uint32_t loop_beat;
+
 /* Host direct-pixel mode: written from the mcumgr (SMP) thread, read by the
  * render thread. A torn frame is a one-frame glitch at 50 FPS — harmless —
  * so a volatile flag without locking is enough. */
@@ -183,6 +189,13 @@ static void rrgb_loop(void *a, void *b, void *c) {
     bool rail_on = true;        /* driver init leaves PC2 HIGH */
     uint32_t dark_ticks = 0;
     for (;;) {
+        /* Liveness beat — deliberately NOT rt.tick, which only advances inside
+         * render_once() and so freezes whenever the strip is legitimately dark
+         * (idle blank, RGB off). This counter advances once per iteration, so a
+         * caller can tell "thread is gone" from "thread is fine, nothing to
+         * draw" — the two states the dark-strip bug made indistinguishable. */
+        loop_beat++;
+
         /* Deadline-based pacing: render_once sleeps through the ~2.66 ms DMA
          * transfer (End-IRQ), so sleep only the remainder of the frame period
          * to hold a steady RRGB_FPS regardless of render duration. */
@@ -322,6 +335,16 @@ void rrgb_host_clear(void) {
 
 bool rrgb_host_active(void) {
     return host_mode;
+}
+
+/* Render-loop heartbeat: advances once per loop iteration whether or not a
+ * frame is drawn, so a caller that samples it twice can tell a live loop from a
+ * dead one — the distinction that cost this bug weeks, because every other
+ * signal (keys, USB, SMP, the accepted host frame) stays healthy when only this
+ * thread dies. Exposed over SMP by rgb_mgmt's info command, so two
+ * `rainy75_rgb.py info` calls answer it outright. */
+uint32_t rrgb_heartbeat(void) {
+    return loop_beat;
 }
 
 /* Activity-idle hook (CONFIG_RAINY_RGB_IDLE_BLANK). Fed by the ZMK
