@@ -16,7 +16,16 @@ LOG_MODULE_REGISTER(rrgb_engine, CONFIG_LOG_DEFAULT_LEVEL);
 #define RRGB_N         83
 #define RRGB_FPS       50
 #define RRGB_PERIOD_MS (1000 / RRGB_FPS)   /* 20 ms target frame period (exact) */
-#define RRGB_STACK     1024
+/* 1024 was too tight: a render frame nests render_once() -> an effect's render()
+ * -> rrgb_overlay_render() -> rrgb_strip_show(), and a LOG_WRN on that path adds
+ * a logging frame on top.  An overflow here is not a crash you can find later —
+ * Zephyr's default fatal handler aborts only the offending (non-essential)
+ * thread and lets the system run on, so the board keeps typing, USB and SMP keep
+ * answering, host-mode frames are still ACCEPTED, and the strip is simply dark
+ * forever with nothing in the log.  That is exactly the dark-strip episode.
+ * Pair this with CONFIG_STACK_SENTINEL so a future overflow is reported instead
+ * of silently eating the thread. */
+#define RRGB_STACK     2048
 #define RRGB_PRIO      10   /* preemptible, below BLE */
 
 /* LED VCC rail (PC2) management: cut the rail only after the strip has stayed
@@ -314,6 +323,7 @@ void rrgb_host_clear(void) {
 bool rrgb_host_active(void) {
     return host_mode;
 }
+
 /* Activity-idle hook (CONFIG_RAINY_RGB_IDLE_BLANK). Fed by the ZMK
  * activity_state_changed event; the render loop blanks while idle. */
 void rrgb_set_idle(bool idle) {
