@@ -1,6 +1,6 @@
 # Wobkey Rainy 75 Pro — Open ZMK Firmware & Reverse Engineering
 
-Open-source **[ZMK](https://zmk.dev) firmware** for the Wobkey Rainy 75 Pro (ISO DE),
+Open-source **[ZMK](https://zmk.dev) firmware** for the Wobkey Rainy 75 Pro,
 plus a complete **reverse-engineering writeup** of its stock firmware and hardware —
 the Telink TLSR9511 (B91, RISC-V) platform shared across a dozen enthusiast keyboards.
 
