@@ -29,18 +29,43 @@ LAYOUT=""             # "iso" or "ansi" — REQUIRED for app builds, no default
 ANSI_DTFLAG=""        # set when LAYOUT=ansi
 
 # ── Apply upstream patches if needed ──────────────────────────
+#
+# A patch is "already applied" when its commit subject is in the target repo's
+# history — `git am` records the subject verbatim, so this holds for every patch
+# in a stack. The obvious test, `git apply --reverse --check`, does NOT: once a
+# later patch rewrites the same lines, the earlier one no longer reverses
+# cleanly and gets re-applied on every build, failing loudly and harmlessly.
+# That noise is indistinguishable from a patch that genuinely did not apply,
+# which is how the bind-window grace (zmk-src 0003) went missing from every
+# build unnoticed.
+#
+# A patch that truly fails is fatal: building without it silently produces
+# firmware that is not the tree anyone reviewed.
 apply_patches() {
-    local repo="$1" dir="$2"
+    local repo="$1" dir="$2" patch subject
+    # Neutral committer for both am and its abort: these are throwaway commits
+    # in fetched trees (the patch carries its own author), and `git am --abort`
+    # also needs an identity — without one it fails and leaves a half-finished
+    # .git/rebase-apply behind, which breaks the *next* build with a confusing
+    # "previous rebase directory still exists".
+    local ident=(-c user.name="rainy75 build" -c user.email="build@localhost")
     for patch in "patches/$repo"/*.patch; do
         [ -f "$patch" ] || continue
-        if git -C "$dir" apply --reverse --check "$PWD/$patch" 2>/dev/null; then
-            continue  # already applied
+        subject=$(git mailinfo /dev/null /dev/null < "$patch" 2>/dev/null |
+                  sed -n 's/^Subject: //p')
+        if [ -n "$subject" ] &&
+           git -C "$dir" log --format=%s | grep -Fxq "$subject"; then
+            continue
         fi
         echo "Applying patch: $repo/$(basename "$patch")"
-        git -C "$dir" am --3way "$PWD/$patch" || {
-            echo "WARNING: Patch failed — may need manual resolution." >&2
-            git -C "$dir" am --abort 2>/dev/null || true
-        }
+        if ! git -C "$dir" "${ident[@]}" am --3way "$PWD/$patch"; then
+            git -C "$dir" "${ident[@]}" am --abort 2>/dev/null || true
+            rm -rf "$dir/.git/rebase-apply"
+            echo "ERROR: $repo/$(basename "$patch") failed to apply." >&2
+            echo "       Resolve it in $dir before building; a build without" >&2
+            echo "       it is not the firmware this tree describes." >&2
+            exit 1
+        fi
     done
 }
 apply_patches zephyr zephyr
