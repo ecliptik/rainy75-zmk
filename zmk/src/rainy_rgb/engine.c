@@ -1,6 +1,9 @@
 #include <zephyr/kernel.h>
 #include <zephyr/init.h>
 #include <zephyr/logging/log.h>
+#if IS_ENABLED(CONFIG_USB_DC_B91)
+#include <b91_usb_diag.h>
+#endif
 #include "engine.h"
 #include "effects.h"
 #include "led_map.h"
@@ -23,6 +26,58 @@ LOG_MODULE_REGISTER(rrgb_engine, CONFIG_LOG_DEFAULT_LEVEL);
 #define RRGB_RAIL_OFF_HOLD_MS 2000
 #define RRGB_RAIL_OFF_TICKS   (RRGB_RAIL_OFF_HOLD_MS / RRGB_PERIOD_MS)
 #define RRGB_RAIL_SETTLE_MS   5
+
+/* --- Black-box instrumentation (B91_DIAG_RGB_STATE) ---------------------
+ * Chasing a dark-strip episode where the firmware was healthy, SMP answered,
+ * host-mode frames were accepted (which overrides the idle blank) and the DMA
+ * never reported a timeout — yet nothing lit, and only a USB resume restored
+ * it.  That combination points at the LED rail being low while the render loop
+ * believed it high: `rail_on` is loop-local state, so anything that drops PC2
+ * behind its back is invisible to it and never re-powered.
+ *
+ * Sample what the loop believes AND what the pin actually reads, and record
+ * every change into the USB diagnostic ring (survives replug on battery,
+ * readable with reverse/tools/usb_diag.py).
+ */
+/* Keepalive cadence is bounded by the ring, not by curiosity: 64 entries
+ * shared with the USB events, so a 5 min tick emits ~96 entries overnight and
+ * wraps away the very divergence the trap exists to catch.  30 min fits a full
+ * night (~16 entries) with room for transitions. */
+#define RRGB_DIAG_KEEPALIVE_TICKS (30 * 60 * RRGB_FPS)  /* ~30 min */
+
+/* Sample the rail and record it, returning the raw pin state so the caller can
+ * act on it without reading the registers a second time.  Note the frame count
+ * is private: rt.tick only advances inside render_once(), so it freezes in
+ * exactly the blanked state this trap has to keep watching. */
+static uint8_t rrgb_diag_state(bool rail_believed, bool idle, bool host, bool on)
+{
+	uint8_t rail = rrgb_strip_rail_state();
+
+#if IS_ENABLED(CONFIG_USB_DC_B91) && IS_ENABLED(CONFIG_LED_STRIP_B91_SPI_PC2_POWER)
+	static uint8_t last_bits = 0xFF;
+	static uint32_t last_tick;
+	static uint32_t ticks;
+
+	uint8_t bits = (rail_believed ? BIT(0) : 0) | (idle ? BIT(1) : 0) |
+		       (host ? BIT(2) : 0) | (on ? BIT(3) : 0) |
+		       ((rail & RRGB_RAIL_HIGH) ? BIT(4) : 0) |
+		       ((rail & RRGB_RAIL_OUT_EN) ? BIT(5) : 0) |
+		       ((rail & RRGB_RAIL_GPIO_MODE) ? BIT(6) : 0);
+
+	ticks++;
+	if (bits != last_bits ||
+	    (ticks - last_tick) >= RRGB_DIAG_KEEPALIVE_TICKS) {
+		last_bits = bits;
+		last_tick = ticks;
+		b91_usb_diag_note(32 /* B91_DIAG_RGB_STATE */, bits,
+				  (uint16_t)(ticks >> 4));
+	}
+#else
+	ARG_UNUSED(rail_believed); ARG_UNUSED(idle);
+	ARG_UNUSED(host); ARG_UNUSED(on);
+#endif
+	return rail;
+}
 
 /* --- Animation speed model (FPS-independent) ---
  * Ambient effects advance off a shared phase accumulator, NOT the raw frame
@@ -131,10 +186,38 @@ static void rrgb_loop(void *a, void *b, void *c) {
          * host notification pulse still shows when the board is idle. When the
          * option is off, IS_ENABLED() folds idle_off to false — identical behaviour. */
         bool idle_off = IS_ENABLED(CONFIG_RAINY_RGB_IDLE_BLANK) && rt.idle && !host_mode;
+
+        /* Black box: what we believe vs what the pin says (see above). */
+        uint8_t rail = rrgb_diag_state(rail_on, rt.idle, host_mode, rt.on);
+
         if (!idle_off && (rt.on || host_mode || rrgb_overlay_active(rt.tick))) {
             if (!rail_on) {
                 rrgb_strip_power(true);
                 rail_on = true;
+                k_msleep(RRGB_RAIL_SETTLE_MS);
+            } else if (IS_ENABLED(CONFIG_LED_STRIP_B91_SPI_PC2_POWER) &&
+                       (rail & (RRGB_RAIL_HIGH | RRGB_RAIL_OUT_EN |
+                                RRGB_RAIL_GPIO_MODE)) !=
+                           (RRGB_RAIL_HIGH | RRGB_RAIL_OUT_EN |
+                            RRGB_RAIL_GPIO_MODE)) {
+                /* We think the rail is up but the pin disagrees, so every frame
+                 * we render lands on an unpowered strip and nothing lights —
+                 * exactly the dark-strip episode this instrumentation chases.
+                 * Any of the three can do it: the level dropped, the output
+                 * driver was disabled, or the pin left GPIO mode. The diag
+                 * event above has already recorded which; re-assert the rail
+                 * (rrgb_strip_power replays all three) so the board recovers
+                 * on its own. */
+                LOG_WRN("LED rail diverged while believed on (state 0x%02x); "
+                        "re-asserting", rail);
+#if IS_ENABLED(CONFIG_USB_DC_B91)
+                /* Durability: the ring wraps in ~a day of keepalives, and a
+                 * cold boot wipes it, so get this divergence into NVS before
+                 * the self-heal erases the only symptom. The diag event was
+                 * recorded earlier this frame, so the snapshot contains it. */
+                b91_usb_diag_persist_async();
+#endif
+                rrgb_strip_power(true);
                 k_msleep(RRGB_RAIL_SETTLE_MS);
             }
             render_once();

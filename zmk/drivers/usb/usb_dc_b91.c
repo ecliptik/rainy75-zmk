@@ -125,6 +125,19 @@ enum b91_usb_diag_code {
 				  * events since previous tick. Logged on
 				  * transitions while not yet suspended —
 				  * shows which gate blocks detection. */
+	/* Codes >= 32 are contributed by other subsystems through
+	 * b91_usb_diag_note(); the ring is simply the board's black box. */
+	B91_DIAG_RGB_STATE = 32, /* rainy_rgb render loop: a = state bits
+				  * (0 rail believed on, 1 idle, 2 host mode,
+				  * 3 effect on, 4 PC2 pin actually high,
+				  * 5 PC2 output enabled, 6 PC2 in GPIO mode);
+				  * b = frame tick >> 4.  Emitted on any change
+				  * and every ~30 min (the keepalive is paced so
+				  * a night of it cannot wrap this 64-entry ring
+				  * past the event it exists to catch).  Bit 0
+				  * set with bit 4 clear = the loop believes the
+				  * LED rail is powered while the pin says
+				  * otherwise. */
 };
 
 static __noinit struct {
@@ -180,6 +193,13 @@ size_t b91_usb_diag_snapshot(struct b91_usb_diag_evt *out, size_t skip,
 	return n;
 }
 
+/* Public entry point so other subsystems can record into the same black box
+ * (it is .noinit, SMP-readable and persisted to NVS at fault time). */
+void b91_usb_diag_note(uint8_t code, uint8_t a, uint16_t b)
+{
+	diag_ev(code, a, b);
+}
+
 /* Hook invoked when the CDC bulk OUT endpoint has been starved (enabled but
  * un-armed while the host holds us configured) past the threshold.  The app
  * layer overrides this to cycle a USB re-attach; the weak default keeps
@@ -192,6 +212,10 @@ __weak size_t b91_usb_diag_saved(const uint8_t **blob)
 {
 	*blob = NULL;
 	return 0;
+}
+
+__weak void b91_usb_diag_persist_async(void)
+{
 }
 
 __weak void b91_usb_stress_start(uint32_t cycles, uint32_t gap_ms)
@@ -553,8 +577,12 @@ static void wstall_capture_details(void)
 			bits |= BIT(0);
 		}
 
-		/* Walk the queue's pending list looking for this node. */
+		/* Walk the queue's pending list looking for this node, with
+		 * interrupts locked: the work module manipulates this list from
+		 * ISR context, so an unlocked walk could follow a node while it
+		 * is being relinked. */
 		sys_snode_t *node;
+		unsigned int key = irq_lock();
 
 		SYS_SLIST_FOR_EACH_NODE(&z_usb_work_q.pending, node) {
 			if (node == &w->node) {
@@ -562,6 +590,7 @@ static void wstall_capture_details(void)
 				break;
 			}
 		}
+		irq_unlock(key);
 
 		diag_ev(B91_DIAG_WQPTR, (uint8_t)i, bits);
 	}

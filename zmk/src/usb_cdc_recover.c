@@ -108,6 +108,36 @@ static void ring_persist(void)
 
 #endif
 
+/* Persist the ring on demand, from any thread.
+ *
+ * A fault detected outside the USB recovery path — the RGB rail divergence
+ * trap, say — needs the same durability: the 64-entry ring wraps in about a
+ * day of keepalives, and a cable pull with the wireless switch off is a cold
+ * boot that wipes .noinit entirely.  Writing flash takes tens of ms, so defer
+ * to the system workqueue rather than stalling a 50 FPS render loop, and rate
+ * limit it: the caller may see the fault on consecutive frames, and flash has
+ * a finite write budget.
+ */
+static void ring_persist_work_cb(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	ring_persist();
+}
+
+static K_WORK_DEFINE(ring_persist_work, ring_persist_work_cb);
+
+void b91_usb_diag_persist_async(void)
+{
+	static int64_t last_persist;
+	int64_t now = k_uptime_get();
+
+	if (last_persist != 0 && (now - last_persist) < 60000) {
+		return;
+	}
+	last_persist = now;
+	k_work_submit(&ring_persist_work);
+}
+
 /* Minimum uptime before the reboot escalation is allowed: if the wedge
  * re-formed this quickly after a boot, rebooting again would loop. */
 #define RECOVER_REBOOT_MIN_UPTIME_MS (10 * 60 * 1000)
