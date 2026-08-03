@@ -220,9 +220,25 @@ static void rrgb_loop(void *a, void *b, void *c) {
          * to send anything at all. Host animations refresh continuously, so a
          * silence this long means the host is genuinely gone. */
 #if defined(CONFIG_RGB_MGMT) && CONFIG_RGB_MGMT_HOST_TIMEOUT_S > 0
+        /* Both sides of the compare must stay SIGNED. Zephyr's MSEC_PER_SEC is
+         * 1000U, and an unsigned right-hand side would drag the int32_t delta
+         * unsigned with it under the usual arithmetic conversions — turning
+         * every negative delta into a huge positive and expiring host mode the
+         * instant one appeared. That is reachable: the clock is sampled before
+         * host_last_ms is read, so a frame landing between the two reads makes
+         * the stamp newer than the sample. Hence the literal 1000, not
+         * MSEC_PER_SEC.
+         *
+         * Known benign race, left unlocked deliberately: the test and the
+         * `host_mode = false` write are not atomic, so a frame arriving in that
+         * window is dropped and the board shows effects for one frame. The next
+         * frame re-enters host mode (<=0.5 s even for the slowest host
+         * animation), and it needs a host to resume at the exact instant a 30 s
+         * silence expires. Locking the render path at 50 FPS costs more than
+         * the glitch. */
         if (host_mode &&
             (int32_t)(k_uptime_get_32() - host_last_ms) >
-                    CONFIG_RGB_MGMT_HOST_TIMEOUT_S * MSEC_PER_SEC) {
+                    (int32_t)CONFIG_RGB_MGMT_HOST_TIMEOUT_S * 1000) {
             host_mode = false;
             LOG_WRN("host mode expired after %d s of silence; back to effects",
                     CONFIG_RGB_MGMT_HOST_TIMEOUT_S);
@@ -378,6 +394,24 @@ bool rrgb_host_active(void) {
  * `rainy75_rgb.py info` calls answer it outright. */
 uint32_t rrgb_heartbeat(void) {
     return loop_beat;
+}
+
+/* Bytes still untouched on the render thread's stack (0 if unavailable).
+ * The 1 KB that killed this thread was a guess, and so is the 2 KB replacing
+ * it — this turns the next answer into a measurement, readable from the host
+ * without a shell or a debugger. Needs CONFIG_INIT_STACKS +
+ * CONFIG_THREAD_STACK_INFO to paint and walk the stack. */
+uint32_t rrgb_stack_unused(void) {
+#if defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO)
+    size_t unused = 0;
+
+    if (k_thread_stack_space_get(&rrgb_thread, &unused) != 0) {
+        return 0;
+    }
+    return (uint32_t)unused;
+#else
+    return 0;
+#endif
 }
 
 /* Activity-idle hook (CONFIG_RAINY_RGB_IDLE_BLANK). Fed by the ZMK

@@ -54,6 +54,7 @@ config RGB_MGMT
 config RGB_MGMT_HOST_TIMEOUT_S
 	int "Seconds of host silence before host mode expires (0 = never)"
 	default 30
+	range 0 3600
 	depends on RGB_MGMT
 	help
 	  Host mode is released by an explicit clear command, so a host that
