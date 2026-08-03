@@ -36,4 +36,7 @@ bool rrgb_host_active(void);
 /* Render-loop heartbeat: advances once per loop iteration, drawn or not, so a
  * stalled value means the thread is gone rather than merely idle (see engine.c). */
 uint32_t rrgb_heartbeat(void);
+
+/* Untouched bytes left on the render thread's stack; 0 if unmeasurable. */
+uint32_t rrgb_stack_unused(void);
 #endif

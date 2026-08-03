@@ -11,7 +11,7 @@
  *             normal mode starts from an all-black frame.
  *   1: fill   {"r": uint, "g": uint, "b": uint} -> {"rc": int}
  *   2: clear  {}                            -> {"rc": int}  (back to effects)
- *   3: info   (read)        -> {"rc": 0, "n": 83, "host": bool, "beat": uint}
+ *   3: info (read) -> {"rc":0,"n":83,"host":bool,"beat":uint,"sfree":uint}
  *
  * Positions are keymap positions (0..82, ISO row-major) — the engine's
  * led_map translates to physical LED indices, so the same host code works
@@ -129,7 +129,9 @@ static int rgb_mgmt_info(struct smp_streamer *ctxt)
 		  zcbor_tstr_put_lit(zse, "host") &&
 		  zcbor_bool_put(zse, rrgb_host_active()) &&
 		  zcbor_tstr_put_lit(zse, "beat") &&
-		  zcbor_uint32_put(zse, rrgb_heartbeat());
+		  zcbor_uint32_put(zse, rrgb_heartbeat()) &&
+		  zcbor_tstr_put_lit(zse, "sfree") &&
+		  zcbor_uint32_put(zse, rrgb_stack_unused());
 	return ok ? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;
 }
 

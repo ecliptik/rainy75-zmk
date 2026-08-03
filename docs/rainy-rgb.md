@@ -216,7 +216,7 @@ same SMP transport as DFU (USB CDC-ACM serial). Group 65, four commands:
 | 0 | set   | `{"px": bstr}` — quads of `[keymap_position, r, g, b]` | light specific keys; first set after normal mode starts from black; later sets are incremental |
 | 1 | fill  | `{"r","g","b"}` | whole board one color |
 | 2 | clear | `{}` | exit host mode, back to the normal effect |
-| 3 | info  | (read) | `{"n": 83, "host": bool, "beat": uint}` |
+| 3 | info  | (read) | `{"n": 83, "host": bool, "beat": uint, "sfree": uint}` |
 
 Positions are **keymap positions** (0..82, row-major), translated through
 `led_map` on the device — the same host code works on ISO and ANSI boards.
@@ -249,10 +249,17 @@ still looks healthy — the board types, USB and SMP answer, and `set`/`fill` ar
 python3 reverse/tools/rainy75_rgb.py info; sleep 1; python3 reverse/tools/rainy75_rgb.py info
 ```
 
-A stalled `tick` means the thread hit a fatal error and Zephyr aborted it alone
+A stalled `beat` means the thread hit a fatal error and Zephyr aborted it alone
 (the default handler only halts the system for *essential* threads). Build with
 `CONFIG_STACK_SENTINEL=y` to have an overflow reported rather than silently
 eating the thread; a reboot restarts it.
+
+`sfree` is the render thread's **untouched stack bytes** — the high-water mark
+the other way round. The 1 KB stack that originally killed this thread was a
+guess, and so is the 2 KB replacing it, so this reports the headroom instead of
+assuming it: watch it after a long uptime with effects, overlays and host mode
+all exercised. It needs `CONFIG_INIT_STACKS` + `CONFIG_THREAD_STACK_INFO` to
+paint and walk the stack, and reads `0` when either is off.
 
 Host-side client: [`reverse/tools/rainy75_rgb.py`](../reverse/tools/rainy75_rgb.py)
 (stdlib-only Python, Linux/macOS):
