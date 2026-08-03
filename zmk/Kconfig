@@ -51,6 +51,24 @@ config RGB_MGMT
 	  keymap position, fill, or clear back to the normal effect. Any
 	  physical Fn+RGB control exits host mode.
 
+config RGB_MGMT_HOST_TIMEOUT_S
+	int "Seconds of host silence before host mode expires (0 = never)"
+	default 30
+	depends on RGB_MGMT
+	help
+	  Host mode is released by an explicit clear command, so a host that
+	  dies without sending one leaves the board displaying its last frame
+	  forever: the idle blank cannot help (host mode deliberately overrides
+	  it) and on battery nothing else intervenes. Undocking mid-animation
+	  does exactly this — the link dies before the host can retract the
+	  frame, and there is then no host left to send anything.
+
+	  Expire host mode when no set/fill has arrived for this long. Host
+	  animations refresh continuously (worst-case gap is a few seconds), so
+	  this only fires when the host really is gone. Note the trade-off: a
+	  deliberately static "fill and walk away" also reverts after this long.
+	  Set 0 to disable and restore the old indefinite behaviour.
+
 config RAINY_RGB_ANSI_LEDMAP
 	bool "ANSI LED map (strip has no LED at the ISO <> slot)"
 	depends on RAINY_RGB

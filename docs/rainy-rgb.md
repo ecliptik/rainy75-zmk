@@ -225,6 +225,18 @@ functional overlays (CapsLock / Fn-highlight / battery) still render on top,
 and **any physical Fn+RGB control exits host mode** — a stray script can never
 lock the user out of their lighting.
 
+**Host mode also expires on its own** after
+`CONFIG_RGB_MGMT_HOST_TIMEOUT_S` (default 30 s) with no `set`/`fill`. Without
+that watchdog a host which dies without sending `clear` strands the board on its
+last frame forever: the idle blank cannot rescue it (host mode overrides the
+blank by design) and on battery nothing else intervenes. Undocking mid-animation
+is the case that bites — the link dies before the host can retract the frame,
+and afterwards there is no host left to send anything. Host animations refresh
+continuously (largest gap is well under a second), so the timeout only fires
+when the host really is gone. The trade-off is that a deliberately static
+"fill and walk away" also reverts after that long; set the option to `0` to
+disable and restore indefinite host mode.
+
 `beat` is the **render-loop heartbeat**, advancing once per loop iteration —
 whether or not a frame is drawn, so an idle-blanked board still beats (the
 private `rt.tick` frame counter deliberately does *not*, and is the wrong thing

@@ -134,6 +134,21 @@ static volatile uint32_t loop_beat;
 static struct rrgb host_px[RRGB_N];
 static volatile bool host_mode;
 
+/* Millisecond stamp of the last host frame, for the host-mode watchdog
+ * (CONFIG_RGB_MGMT_HOST_TIMEOUT_S). Deliberately the 32-bit uptime: a 64-bit
+ * load is not atomic on this core, and the comparison below uses a signed
+ * delta, which tolerates the ~49-day wrap the same way the strip driver's
+ * reset-latch deadline does. */
+static volatile uint32_t host_last_ms;
+
+/* Enter or refresh host mode. The stamp is written BEFORE the flag so the
+ * render thread can never observe host_mode set against a stale timestamp and
+ * expire the frame it was just handed. */
+static void host_touch(void) {
+    host_last_ms = k_uptime_get_32();
+    host_mode = true;
+}
+
 #define RRGB_PERSIST_VERSION 1
 
 void rrgb_get_persist(struct rrgb_persist *out) {
@@ -195,6 +210,24 @@ static void rrgb_loop(void *a, void *b, void *c) {
          * caller can tell "thread is gone" from "thread is fine, nothing to
          * draw" — the two states the dark-strip bug made indistinguishable. */
         loop_beat++;
+
+        /* Host-mode watchdog. Host mode is normally released by an explicit
+         * clear, so a host that dies without sending one strands the board on
+         * its last frame indefinitely — the idle blank cannot rescue it (host
+         * mode overrides the blank by design) and on battery nothing else will.
+         * Undocking mid-animation is the case that bites: the link dies before
+         * the host can retract the frame, and afterwards there is no host left
+         * to send anything at all. Host animations refresh continuously, so a
+         * silence this long means the host is genuinely gone. */
+#if defined(CONFIG_RGB_MGMT) && CONFIG_RGB_MGMT_HOST_TIMEOUT_S > 0
+        if (host_mode &&
+            (int32_t)(k_uptime_get_32() - host_last_ms) >
+                    CONFIG_RGB_MGMT_HOST_TIMEOUT_S * MSEC_PER_SEC) {
+            host_mode = false;
+            LOG_WRN("host mode expired after %d s of silence; back to effects",
+                    CONFIG_RGB_MGMT_HOST_TIMEOUT_S);
+        }
+#endif
 
         /* Deadline-based pacing: render_once sleeps through the ~2.66 ms DMA
          * transfer (End-IRQ), so sleep only the remainder of the frame period
@@ -321,12 +354,12 @@ void rrgb_host_set_pixels(const uint8_t *quads, uint16_t count) {
         if (led < 0) { continue; }
         host_px[led] = (struct rrgb){q[1], q[2], q[3]};
     }
-    host_mode = true;
+    host_touch();
 }
 
 void rrgb_host_fill(uint8_t r, uint8_t g, uint8_t b) {
     for (uint16_t i = 0; i < RRGB_N; i++) { host_px[i] = (struct rrgb){r, g, b}; }
-    host_mode = true;
+    host_touch();
 }
 
 void rrgb_host_clear(void) {
