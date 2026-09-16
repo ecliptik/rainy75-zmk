@@ -16,7 +16,16 @@ LOG_MODULE_REGISTER(rrgb_engine, CONFIG_LOG_DEFAULT_LEVEL);
 #define RRGB_N         83
 #define RRGB_FPS       50
 #define RRGB_PERIOD_MS (1000 / RRGB_FPS)   /* 20 ms target frame period (exact) */
-#define RRGB_STACK     1024
+/* 1024 was too tight: a render frame nests render_once() -> an effect's render()
+ * -> rrgb_overlay_render() -> rrgb_strip_show(), and a LOG_WRN on that path adds
+ * a logging frame on top.  An overflow here is not a crash you can find later —
+ * Zephyr's default fatal handler aborts only the offending (non-essential)
+ * thread and lets the system run on, so the board keeps typing, USB and SMP keep
+ * answering, host-mode frames are still ACCEPTED, and the strip is simply dark
+ * forever with nothing in the log.  That is exactly the dark-strip episode.
+ * Pair this with CONFIG_STACK_SENTINEL so a future overflow is reported instead
+ * of silently eating the thread. */
+#define RRGB_STACK     2048
 #define RRGB_PRIO      10   /* preemptible, below BLE */
 
 /* LED VCC rail (PC2) management: cut the rail only after the strip has stayed
@@ -113,11 +122,32 @@ static struct rrgb_runtime rt = {
 static struct rrgb pixels[RRGB_N];
 static uint32_t anim_phase_q8;   /* .8 fixed-point animation phase accumulator */
 
+/* Render-loop liveness beat (see rrgb_heartbeat). Written by the render thread,
+ * read from the mcumgr (SMP) thread; a 32-bit aligned load is atomic on this
+ * core, so volatile without locking is enough — and a torn read would only
+ * misreport one sample of a counter the caller compares across a second. */
+static volatile uint32_t loop_beat;
+
 /* Host direct-pixel mode: written from the mcumgr (SMP) thread, read by the
  * render thread. A torn frame is a one-frame glitch at 50 FPS — harmless —
  * so a volatile flag without locking is enough. */
 static struct rrgb host_px[RRGB_N];
 static volatile bool host_mode;
+
+/* Millisecond stamp of the last host frame, for the host-mode watchdog
+ * (CONFIG_RGB_MGMT_HOST_TIMEOUT_S). Deliberately the 32-bit uptime: a 64-bit
+ * load is not atomic on this core, and the comparison below uses a signed
+ * delta, which tolerates the ~49-day wrap the same way the strip driver's
+ * reset-latch deadline does. */
+static volatile uint32_t host_last_ms;
+
+/* Enter or refresh host mode. The stamp is written BEFORE the flag so the
+ * render thread can never observe host_mode set against a stale timestamp and
+ * expire the frame it was just handed. */
+static void host_touch(void) {
+    host_last_ms = k_uptime_get_32();
+    host_mode = true;
+}
 
 #define RRGB_PERSIST_VERSION 1
 
@@ -174,6 +204,47 @@ static void rrgb_loop(void *a, void *b, void *c) {
     bool rail_on = true;        /* driver init leaves PC2 HIGH */
     uint32_t dark_ticks = 0;
     for (;;) {
+        /* Liveness beat — deliberately NOT rt.tick, which only advances inside
+         * render_once() and so freezes whenever the strip is legitimately dark
+         * (idle blank, RGB off). This counter advances once per iteration, so a
+         * caller can tell "thread is gone" from "thread is fine, nothing to
+         * draw" — the two states the dark-strip bug made indistinguishable. */
+        loop_beat++;
+
+        /* Host-mode watchdog. Host mode is normally released by an explicit
+         * clear, so a host that dies without sending one strands the board on
+         * its last frame indefinitely — the idle blank cannot rescue it (host
+         * mode overrides the blank by design) and on battery nothing else will.
+         * Undocking mid-animation is the case that bites: the link dies before
+         * the host can retract the frame, and afterwards there is no host left
+         * to send anything at all. Host animations refresh continuously, so a
+         * silence this long means the host is genuinely gone. */
+#if defined(CONFIG_RGB_MGMT) && CONFIG_RGB_MGMT_HOST_TIMEOUT_S > 0
+        /* Both sides of the compare must stay SIGNED. Zephyr's MSEC_PER_SEC is
+         * 1000U, and an unsigned right-hand side would drag the int32_t delta
+         * unsigned with it under the usual arithmetic conversions — turning
+         * every negative delta into a huge positive and expiring host mode the
+         * instant one appeared. That is reachable: the clock is sampled before
+         * host_last_ms is read, so a frame landing between the two reads makes
+         * the stamp newer than the sample. Hence the literal 1000, not
+         * MSEC_PER_SEC.
+         *
+         * Known benign race, left unlocked deliberately: the test and the
+         * `host_mode = false` write are not atomic, so a frame arriving in that
+         * window is dropped and the board shows effects for one frame. The next
+         * frame re-enters host mode (<=0.5 s even for the slowest host
+         * animation), and it needs a host to resume at the exact instant a 30 s
+         * silence expires. Locking the render path at 50 FPS costs more than
+         * the glitch. */
+        if (host_mode &&
+            (int32_t)(k_uptime_get_32() - host_last_ms) >
+                    (int32_t)CONFIG_RGB_MGMT_HOST_TIMEOUT_S * 1000) {
+            host_mode = false;
+            LOG_WRN("host mode expired after %d s of silence; back to effects",
+                    CONFIG_RGB_MGMT_HOST_TIMEOUT_S);
+        }
+#endif
+
         /* Deadline-based pacing: render_once sleeps through the ~2.66 ms DMA
          * transfer (End-IRQ), so sleep only the remainder of the frame period
          * to hold a steady RRGB_FPS regardless of render duration. */
@@ -299,12 +370,12 @@ void rrgb_host_set_pixels(const uint8_t *quads, uint16_t count) {
         if (led < 0) { continue; }
         host_px[led] = (struct rrgb){q[1], q[2], q[3]};
     }
-    host_mode = true;
+    host_touch();
 }
 
 void rrgb_host_fill(uint8_t r, uint8_t g, uint8_t b) {
     for (uint16_t i = 0; i < RRGB_N; i++) { host_px[i] = (struct rrgb){r, g, b}; }
-    host_mode = true;
+    host_touch();
 }
 
 void rrgb_host_clear(void) {
@@ -314,6 +385,35 @@ void rrgb_host_clear(void) {
 bool rrgb_host_active(void) {
     return host_mode;
 }
+
+/* Render-loop heartbeat: advances once per loop iteration whether or not a
+ * frame is drawn, so a caller that samples it twice can tell a live loop from a
+ * dead one — the distinction that cost this bug weeks, because every other
+ * signal (keys, USB, SMP, the accepted host frame) stays healthy when only this
+ * thread dies. Exposed over SMP by rgb_mgmt's info command, so two
+ * `rainy75_rgb.py info` calls answer it outright. */
+uint32_t rrgb_heartbeat(void) {
+    return loop_beat;
+}
+
+/* Bytes still untouched on the render thread's stack (0 if unavailable).
+ * The 1 KB that killed this thread was a guess, and so is the 2 KB replacing
+ * it — this turns the next answer into a measurement, readable from the host
+ * without a shell or a debugger. Needs CONFIG_INIT_STACKS +
+ * CONFIG_THREAD_STACK_INFO to paint and walk the stack. */
+uint32_t rrgb_stack_unused(void) {
+#if defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO)
+    size_t unused = 0;
+
+    if (k_thread_stack_space_get(&rrgb_thread, &unused) != 0) {
+        return 0;
+    }
+    return (uint32_t)unused;
+#else
+    return 0;
+#endif
+}
+
 /* Activity-idle hook (CONFIG_RAINY_RGB_IDLE_BLANK). Fed by the ZMK
  * activity_state_changed event; the render loop blanks while idle. */
 void rrgb_set_idle(bool idle) {

@@ -216,7 +216,7 @@ same SMP transport as DFU (USB CDC-ACM serial). Group 65, four commands:
 | 0 | set   | `{"px": bstr}` — quads of `[keymap_position, r, g, b]` | light specific keys; first set after normal mode starts from black; later sets are incremental |
 | 1 | fill  | `{"r","g","b"}` | whole board one color |
 | 2 | clear | `{}` | exit host mode, back to the normal effect |
-| 3 | info  | (read) | `{"n": 83, "host": bool}` |
+| 3 | info  | (read) | `{"n": 83, "host": bool, "beat": uint, "sfree": uint}` |
 
 Positions are **keymap positions** (0..82, row-major), translated through
 `led_map` on the device — the same host code works on ISO and ANSI boards.
@@ -224,6 +224,42 @@ Host mode is not persisted (reboot/deep sleep return to the normal effect),
 functional overlays (CapsLock / Fn-highlight / battery) still render on top,
 and **any physical Fn+RGB control exits host mode** — a stray script can never
 lock the user out of their lighting.
+
+**Host mode also expires on its own** after
+`CONFIG_RGB_MGMT_HOST_TIMEOUT_S` (default 30 s) with no `set`/`fill`. Without
+that watchdog a host which dies without sending `clear` strands the board on its
+last frame forever: the idle blank cannot rescue it (host mode overrides the
+blank by design) and on battery nothing else intervenes. Undocking mid-animation
+is the case that bites — the link dies before the host can retract the frame,
+and afterwards there is no host left to send anything. Host animations refresh
+continuously (largest gap is well under a second), so the timeout only fires
+when the host really is gone. The trade-off is that a deliberately static
+"fill and walk away" also reverts after that long; set the option to `0` to
+disable and restore indefinite host mode.
+
+`beat` is the **render-loop heartbeat**, advancing once per loop iteration —
+whether or not a frame is drawn, so an idle-blanked board still beats (the
+private `rt.tick` frame counter deliberately does *not*, and is the wrong thing
+to watch here). Sample `info` twice a second apart: if `beat` does not move, the
+render thread is dead. That case is worth calling out because every other signal
+still looks healthy — the board types, USB and SMP answer, and `set`/`fill` are
+*accepted* — while the strip stays dark indefinitely:
+
+```
+python3 reverse/tools/rainy75_rgb.py info; sleep 1; python3 reverse/tools/rainy75_rgb.py info
+```
+
+A stalled `beat` means the thread hit a fatal error and Zephyr aborted it alone
+(the default handler only halts the system for *essential* threads). Build with
+`CONFIG_STACK_SENTINEL=y` to have an overflow reported rather than silently
+eating the thread; a reboot restarts it.
+
+`sfree` is the render thread's **untouched stack bytes** — the high-water mark
+the other way round. The 1 KB stack that originally killed this thread was a
+guess, and so is the 2 KB replacing it, so this reports the headroom instead of
+assuming it: watch it after a long uptime with effects, overlays and host mode
+all exercised. It needs `CONFIG_INIT_STACKS` + `CONFIG_THREAD_STACK_INFO` to
+paint and walk the stack, and reads `0` when either is off.
 
 Host-side client: [`reverse/tools/rainy75_rgb.py`](../reverse/tools/rainy75_rgb.py)
 (stdlib-only Python, Linux/macOS):
