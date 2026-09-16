@@ -17,14 +17,23 @@ LOG_MODULE_REGISTER(rrgb_engine, CONFIG_LOG_DEFAULT_LEVEL);
 #define RRGB_FPS       50
 #define RRGB_PERIOD_MS (1000 / RRGB_FPS)   /* 20 ms target frame period (exact) */
 /* 1024 was too tight: a render frame nests render_once() -> an effect's render()
- * -> rrgb_overlay_render() -> rrgb_strip_show(), and a LOG_WRN on that path adds
- * a logging frame on top.  An overflow here is not a crash you can find later —
- * Zephyr's default fatal handler aborts only the offending (non-essential)
- * thread and lets the system run on, so the board keeps typing, USB and SMP keep
- * answering, host-mode frames are still ACCEPTED, and the strip is simply dark
- * forever with nothing in the log.  That is exactly the dark-strip episode.
- * Pair this with CONFIG_STACK_SENTINEL so a future overflow is reported instead
- * of silently eating the thread. */
+ * -> rrgb_overlay_render() -> rrgb_strip_show(), a LOG_WRN on that path adds a
+ * logging frame on top, and every interrupt pushes its exception frame onto
+ * this stack before switching to the ISR stack. A static walk of the worst
+ * path came to roughly 770 bytes, so 1 KB left almost no margin.
+ *
+ * An overflow here is not a crash you can find later. The B91 has no PMP stack
+ * guard, so nothing faults: the excess frames land in the neighbouring thread
+ * stack (the BLE RX stack sits directly below this one in .noinit) and that
+ * thread's own writes corrupt this loop's saved locals in turn, e.g. the frame
+ * deadline, leaving the loop asleep for a very long time. The board keeps
+ * typing, USB and SMP keep answering, host-mode frames are still ACCEPTED, and
+ * the strip is simply dark with nothing in the log. That is the dark-strip
+ * episode. (A real fault would NOT look like this: mcuboot_confirm.c overrides
+ * k_sys_fatal_error_handler to cold-reboot, so a faulting thread reboots the
+ * whole board.) CONFIG_STACK_SENTINEL in app.conf turns a future overflow into
+ * exactly that logged reboot instead of a silent hang, and CONFIG_INIT_STACKS
+ * lets rrgb_stack_unused() report the real headroom. */
 #define RRGB_STACK     2048
 #define RRGB_PRIO      10   /* preemptible, below BLE */
 
