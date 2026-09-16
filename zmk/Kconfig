@@ -65,7 +65,7 @@ config RGB_MGMT_HOST_TIMEOUT_S
 	  frame, and there is then no host left to send anything.
 
 	  Expire host mode when no set/fill has arrived for this long. Host
-	  animations refresh continuously (worst-case gap is a few seconds), so
+	  animations refresh continuously (largest gap is well under a second), so
 	  this only fires when the host really is gone. Note the trade-off: a
 	  deliberately static "fill and walk away" also reverts after this long.
 	  Set 0 to disable and restore the old indefinite behaviour.
