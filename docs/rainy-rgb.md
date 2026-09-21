@@ -306,28 +306,38 @@ already satisfies that. Requests larger than one ATT MTU rely on
 
 ## Changelog
 
-Notable fixes and features, most recent first — see the linked sections above for
-mechanism detail.
+Notable `rainy_rgb` fixes and features, most recent first; see the linked
+sections above for mechanism detail. Releases with no engine changes (v0.2.0,
+which shipped USB work only) are omitted.
 
 - **v0.2.2** — Root-cause correction for the dark-strip bug (#30): it's a stack
-  overflow corrupting the *neighbouring* BLE RX stack (the B91 has no PMP stack
-  guard), not Zephyr silently aborting the render thread alone. `CONFIG_STACK_SENTINEL`
-  + `CONFIG_INIT_STACKS` now default on, so the next overflow becomes a logged reboot
-  instead of a silent hang.
-- **v0.2.2** — Dark-strip fix (#29): render thread stack bumped 1 KB → 2 KB; `beat`
-  (render-loop heartbeat) and `sfree` (stack headroom) added to `rgb_mgmt` `info`;
-  host mode now auto-expires after `CONFIG_RGB_MGMT_HOST_TIMEOUT_S` (default 30 s) of
-  silence, so an undocked host can't strand the board on its last frame. See
+  overflow. The B91 has no PMP stack guard and the BLE RX stack sits directly
+  below `rrgb_stack`, so the two threads corrupt each other's frames until the
+  render loop sleeps on a garbage deadline. The earlier note blaming Zephyr for
+  aborting the render thread alone cannot be right: `mcuboot_confirm.c`
+  overrides the fatal handler to cold-reboot, so a real fault takes the whole
+  board with it. `CONFIG_STACK_SENTINEL` and `CONFIG_INIT_STACKS` are now set in
+  `conf/app.conf`, making the next overflow a logged reboot instead of a silent
+  hang (and `sfree` read `0` until `INIT_STACKS` went on).
+- **v0.2.2** — Dark-strip fix (#29): render thread stack bumped 1 KB to 2 KB;
+  `beat` (render-loop heartbeat) and `sfree` (stack headroom) added to
+  `rgb_mgmt` `info`; host mode now auto-expires after
+  `CONFIG_RGB_MGMT_HOST_TIMEOUT_S` (default 30 s) of silence, so an undocked
+  host can't strand the board on its last frame. See
   [Host control](#host-control-rgb_mgmt-mcumgr-group-65).
-- **v0.2.1** — LED rail-divergence trap: every frame records believed-vs-actual PC2
-  state into the USB diagnostic ring, self-heals a divergence, and persists the ring
-  to NVS at fault time. Added after a dark strip was observed once on v0.2.0 with the
-  rail itself never caught diverging — a separate, still-unexplained mystery from the
-  stack-overflow bug above. See [Rail divergence trap](#rail-divergence-trap-black-box).
-- **v0.1.1** — Activity-idle LED blank (`CONFIG_RAINY_RGB_IDLE_BLANK`) and PC2 rail
-  auto-cut while the strip stays dark.
-- **v0.1.0** — Initial engine: 12 effects, opt-in `walker` calibration diagnostic,
-  host-controlled per-key RGB (`rgb_mgmt`, mcumgr group 65) over USB and BLE.
+- **v0.2.1** — LED rail-divergence trap: every frame samples believed-vs-actual
+  PC2 state, records a diagnostic-ring entry on any change (plus a 30 min
+  keepalive, so the 64-entry ring can't wrap the fault away), self-heals a
+  divergence, and persists the ring to NVS at fault time. Added after a dark
+  strip was observed once on v0.2.0, which predates any rail instrumentation;
+  nothing has been caught diverging since the trap went in, so that episode
+  stays unexplained and separate from the stack-overflow bug above. See
+  [Rail divergence trap](#rail-divergence-trap-black-box).
+- **v0.1.1** — Activity-idle LED blank (`CONFIG_RAINY_RGB_IDLE_BLANK`) and PC2
+  rail auto-cut while the strip stays dark.
+- **v0.1.0** — Initial engine: 12 effects, opt-in `walker` calibration
+  diagnostic, host-controlled per-key RGB (`rgb_mgmt`, mcumgr group 65) over USB
+  and BLE.
 
 ## Open items / future
 
