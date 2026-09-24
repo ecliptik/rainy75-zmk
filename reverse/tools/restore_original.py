@@ -11,10 +11,9 @@ Requires firmware built with CONFIG_FLASH_MGMT=y.
 Zero external dependencies — uses only Python stdlib.
 
 Usage:
-    python3 restore_original.py firmware.bin                  # Write firmware
-    python3 restore_original.py firmware.bin --no-verify      # Skip read-back verify
-    python3 restore_original.py firmware.bin --port /dev/ttyACM1
-    python3 restore_original.py --read 0x0 256                # Read flash region
+    python3 restore_original.py firmware.bin --port /dev/ttyACM0    # Write firmware
+    python3 restore_original.py firmware.bin --port /dev/ttyACM0 --no-verify
+    python3 restore_original.py --read 0x0 256 --port /dev/ttyACM0  # Read flash region
     python3 restore_original.py --info firmware.bin           # Show firmware info
 
 Requirements:
@@ -266,7 +265,7 @@ def smp_serial_decode(data):
 # --------------------------------------------------------------------------
 
 class SMPClient:
-    def __init__(self, port='/dev/ttyACM0'):
+    def __init__(self, port):
         self.port = port
         self.seq = 0
         self.fd = None
@@ -609,8 +608,12 @@ def main():
     parser = argparse.ArgumentParser(
         description='Write firmware via mcumgr SMP serial (flash_mgmt group 64)')
     parser.add_argument('firmware', nargs='?', help='Firmware .bin file to write')
-    parser.add_argument('--port', default='/dev/ttyACM0',
-                        help='Serial port (default: /dev/ttyACM0)')
+    # No default: this writes firmware, and a guessed port can be some other
+    # CDC-ACM device (a monitor's control interface, a dev board). In recovery
+    # the keyboard may not identify itself as a Rainy 75 either, so it cannot
+    # be found by name; the port has to be named.
+    parser.add_argument('--port',
+                        help='Serial port of the keyboard (required for --read and writes)')
     parser.add_argument('--no-verify', action='store_true',
                         help='Skip read-back verification')
     parser.add_argument('--info', action='store_true',
@@ -620,6 +623,9 @@ def main():
     parser.add_argument('-y', '--yes', action='store_true',
                         help='Skip confirmation prompt')
     args = parser.parse_args()
+    if (args.read or (args.firmware and not args.info)) and not args.port:
+        parser.error("--port is required: name the keyboard's serial device "
+                     "(e.g. /dev/ttyACM0, /dev/cu.usbmodem...)")
 
     # Read-only flash read mode
     if args.read:
