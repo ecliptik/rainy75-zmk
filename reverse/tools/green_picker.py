@@ -23,7 +23,6 @@ Port contention: a running rainy75-think worker holds the port exclusively
 in another terminal first. Ctrl-C always restores the board.
 """
 import argparse
-import glob
 import importlib.util
 import os
 import sys
@@ -66,20 +65,27 @@ RATE_SECS = 5.0
 ACQUIRE_TIMEOUT_S = 20
 
 
+_rgb_module = None
+
+
+def _load_rgb():
+    global _rgb_module
+    if _rgb_module is None:
+        spec = importlib.util.spec_from_file_location(
+            "rainy75_rgb", os.path.join(TOOLDIR, "rainy75_rgb.py"))
+        _rgb_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_rgb_module)
+    return _rgb_module
+
+
 def _load_client():
-    spec = importlib.util.spec_from_file_location(
-        "rainy75_rgb", os.path.join(TOOLDIR, "rainy75_rgb.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.Rainy75
+    return _load_rgb().Rainy75
 
 
 def _find_port():
-    for pat in ("/dev/cu.usbmodem*123301", "/dev/cu.usbmodem*", "/dev/ttyACM*"):
-        hits = sorted(glob.glob(pat))
-        if hits:
-            return hits[0]
-    return None
+    # By USB product name (rainy75_rgb.find_port), not the first serial node,
+    # which can be another device such as a monitor's control interface.
+    return _load_rgb().find_port()
 
 
 def _acquire(port):

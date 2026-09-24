@@ -10,12 +10,14 @@ Run:  python3 reverse/tools/orange_picker.py
       python3 reverse/tools/orange_picker.py --port /dev/cu.usbmodemXXXX   # optional
 """
 import argparse
-import glob
+import importlib.util
+import os
 import subprocess
 import sys
 import time
 
-TOOL = "/Users/micheal/git/rainy75-zmk/reverse/tools/rainy75_rgb.py"
+# Next to this script, wherever the checkout lives (it named one home dir).
+TOOL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rainy75_rgb.py")
 
 # R=FF, B=00, sweeping the green channel up: less green = redder/less yellow.
 COLORS = [
@@ -36,11 +38,12 @@ GAP_SECS = 2.0
 
 
 def find_port():
-    for pattern in ("/dev/cu.usbmodem*123301", "/dev/cu.usbmodem*", "/dev/ttyACM*"):
-        hits = sorted(glob.glob(pattern))
-        if hits:
-            return hits[0]
-    return None
+    # By USB product name (rainy75_rgb.find_port), not the first serial node,
+    # which can be another device such as a monitor's control interface.
+    spec = importlib.util.spec_from_file_location("rainy75_rgb", TOOL)
+    rgb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rgb)
+    return rgb.find_port()
 
 
 def main():

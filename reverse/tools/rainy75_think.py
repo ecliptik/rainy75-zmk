@@ -61,7 +61,6 @@ import glob
 import importlib.util
 import json
 import os
-import re
 import shutil
 import signal
 import subprocess
@@ -202,106 +201,66 @@ def _rm(path):
 # --------------------------------------------------------------------------
 # finding the keyboard
 #
-# A Rainy 75 shows up as a CDC-ACM serial node: /dev/cu.usbmodem* on macOS,
-# /dev/ttyACM* on Linux. So does any other CDC-ACM device (a monitor's control
-# interface, a dev board), and taking the first match could pick one of those:
-# the frames went to the wrong device, and "no keyboard" never registered, so a
-# missing keyboard never fell through to a no-op. Only a node whose USB device
-# calls itself a Rainy 75 counts.
+# rainy75_rgb.find_port() decides, by USB product name: taking the first
+# CDC-ACM node could open some other device (a monitor's control interface, a
+# dev board). This side only caches its macOS answer, which costs an ioreg call.
 # --------------------------------------------------------------------------
 
 PORT_GLOBS = ("/dev/cu.usbmodem*", "/dev/ttyACM*")
 PORT_CACHE = os.path.join(STATE_DIR, "port.json")
+_rgb_module = None
 
 
-def _is_rainy(product):
-    return bool(re.search(r"rainy ?75", product, re.IGNORECASE))
-
-
-def _sysfs_product(dev):
-    """Linux: the USB product string of the device behind /dev/ttyACMn."""
-    try:
-        with open("/sys/class/tty/%s/device/../product" % os.path.basename(dev)) as f:
-            return f.read().strip()
-    except OSError:
-        return ""
-
-
-def _ioreg_ports():
-    """macOS: callout devices that sit below a Rainy 75 in the IORegistry.
-
-    macOS names the node after its USB location, not the device, so the product
-    name is only in the registry. Each "+-o" line opens a node, indented by its
-    depth; properties follow the node they belong to.
-    """
-    try:
-        out = subprocess.run(
-            ["ioreg", "-r", "-c", "IOUSBHostDevice", "-l", "-w0"],
-            capture_output=True, text=True, timeout=5).stdout
-    except (OSError, subprocess.SubprocessError):
-        return []
-    stack, found = [], []               # [column, product] per open node
-    for line in out.splitlines():
-        col = line.find("+-o ")
-        if col >= 0:
-            while stack and stack[-1][0] >= col:
-                stack.pop()
-            stack.append([col, ""])
-            continue
-        m = re.search(r'"USB Product Name" = "(.*)"', line)
-        if m and stack:
-            stack[-1][1] = m.group(1)
-            continue
-        m = re.search(r'"IOCalloutDevice" = "(.*)"', line)
-        if m and any(_is_rainy(prod) for _, prod in stack):
-            found.append(m.group(1))
-    return found
+def _load_rgb():
+    global _rgb_module
+    if _rgb_module is None:
+        spec = importlib.util.spec_from_file_location(
+            "rainy75_rgb", os.path.join(TOOLDIR, "rainy75_rgb.py"))
+        _rgb_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_rgb_module)
+    return _rgb_module
 
 
 def _find_port():
     """The Rainy 75's serial device, or None.
 
     RAINY75_PORT, when set, is taken as is (the rainy75-think wrapper passes the
-    port it already found). ioreg takes a few hundred ms and _acquire() asks
-    every 0.1 s, so the macOS answer is cached per set of usbmodem nodes:
-    plugging or unplugging anything changes the set.
+    port it already found). On macOS the answer costs a few hundred ms of ioreg
+    and _acquire() asks every 0.1 s, so it is cached per set of usbmodem nodes
+    (plugging or unplugging anything changes the set). Linux is not cached: the
+    sysfs lookup is cheap, and ttyACM names are reused, so a different device
+    can reappear under the keyboard's old name.
     """
     env = os.environ.get("RAINY75_PORT")
     if env:
         return env if os.path.exists(env) else None
     nodes = sorted(n for pat in PORT_GLOBS for n in glob.glob(pat))
-    for node in nodes:
-        if node.startswith("/dev/ttyACM") and _is_rainy(_sysfs_product(node)):
-            return node
-    usbmodem = [n for n in nodes if n.startswith("/dev/cu.")]
-    if not usbmodem:
+    if not nodes:
         return None
-    try:
-        with open(PORT_CACHE) as f:
-            cached = json.load(f)
-        if cached.get("nodes") == usbmodem:
-            return cached.get("port")
-    except (OSError, ValueError, AttributeError):
-        pass
-    hits = [p for p in _ioreg_ports() if p in usbmodem]
-    port = hits[0] if hits else None
-    try:
-        os.makedirs(STATE_DIR, exist_ok=True)
-        tmp = "%s.%d" % (PORT_CACHE, os.getpid())
-        with open(tmp, "w") as f:
-            json.dump({"nodes": usbmodem, "port": port}, f)
-        os.replace(tmp, PORT_CACHE)
-    except OSError:
-        pass
+    macos = any(n.startswith("/dev/cu.") for n in nodes)
+    if macos:
+        try:
+            with open(PORT_CACHE) as f:
+                cached = json.load(f)
+            if cached.get("nodes") == nodes:
+                return cached.get("port")
+        except (OSError, ValueError, AttributeError):
+            pass
+    port = _load_rgb().find_port()
+    if macos:
+        try:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            tmp = "%s.%d" % (PORT_CACHE, os.getpid())
+            with open(tmp, "w") as f:
+                json.dump({"nodes": nodes, "port": port}, f)
+            os.replace(tmp, PORT_CACHE)
+        except OSError:
+            pass
     return port
 
 
 def _load_client():
-    spec = importlib.util.spec_from_file_location(
-        "rainy75_rgb", os.path.join(TOOLDIR, "rainy75_rgb.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.Rainy75
+    return _load_rgb().Rainy75
 
 
 def _alive(pid):
