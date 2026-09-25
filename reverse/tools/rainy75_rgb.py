@@ -7,8 +7,9 @@ Zero external dependencies — Python stdlib only (termios: Linux/macOS).
 SMP/CBOR framing inherited from restore_original.py (same repo).
 
 Library:
-    from rainy75_rgb import Rainy75
-    kb = Rainy75()                              # auto-detects the serial port
+    from rainy75_rgb import Rainy75, find_port
+    kb = Rainy75()                              # finds the Rainy 75 on USB
+    find_port()                                 # its serial device, or None
     kb.set_keys(["F1", "F2", "F3"], (255, 0, 0))
     kb.set_positions({0: (255, 0, 0), 14: (0, 0, 255)})
     kb.fill((0, 32, 64))
@@ -28,7 +29,9 @@ import base64
 import fcntl
 import glob
 import os
+import re
 import struct
+import subprocess
 import sys
 import termios
 import time
@@ -197,6 +200,80 @@ RGB_GROUP = 65
 CMD_SET, CMD_FILL, CMD_CLEAR, CMD_INFO = 0, 1, 2, 3
 
 
+# --------------------------------------------------------------------------
+# finding the keyboard
+#
+# A Rainy 75 shows up as a CDC-ACM serial node: /dev/cu.usbmodem* on macOS,
+# /dev/ttyACM* on Linux. So does any other CDC-ACM device (a monitor's control
+# interface, a dev board), and taking the first sorted match could open one of
+# those and write frames to it. Only a node whose USB device calls itself a
+# Rainy 75 counts. Rainy75(), and so this CLI and usb_stress.py, find the
+# keyboard through find_port().
+# --------------------------------------------------------------------------
+
+PORT_GLOBS = ("/dev/cu.usbmodem*", "/dev/ttyACM*")
+
+
+def is_rainy(product):
+    return bool(re.search(r"rainy ?75", product, re.IGNORECASE))
+
+
+def sysfs_product(dev):
+    """Linux: the USB product string of the device behind /dev/ttyACMn."""
+    try:
+        with open("/sys/class/tty/%s/device/../product" % os.path.basename(dev)) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def ioreg_rainy_ports():
+    """macOS: callout devices that sit below a Rainy 75 in the IORegistry.
+
+    macOS names the node after its USB location, not the device, so the product
+    name is only in the registry. Each "+-o" line opens a node, indented by its
+    depth; properties follow the node they belong to. Takes a few hundred ms.
+    """
+    try:
+        out = subprocess.run(
+            ["ioreg", "-r", "-c", "IOUSBHostDevice", "-l", "-w0"],
+            capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    stack, found = [], []               # [column, product] per open node
+    for line in out.splitlines():
+        col = line.find("+-o ")
+        if col >= 0:
+            while stack and stack[-1][0] >= col:
+                stack.pop()
+            stack.append([col, ""])
+            continue
+        m = re.search(r'"USB Product Name" = "(.*)"', line)
+        if m and stack:
+            stack[-1][1] = m.group(1)
+            continue
+        m = re.search(r'"IOCalloutDevice" = "(.*)"', line)
+        if m and any(is_rainy(prod) for _, prod in stack):
+            found.append(m.group(1))
+    return found
+
+
+def find_port():
+    """The Rainy 75's serial device, or None. RAINY75_PORT, when set, wins."""
+    env = os.environ.get("RAINY75_PORT")
+    if env:
+        return env if os.path.exists(env) else None
+    nodes = sorted(n for pat in PORT_GLOBS for n in glob.glob(pat))
+    for node in nodes:
+        if node.startswith("/dev/ttyACM") and is_rainy(sysfs_product(node)):
+            return node
+    if any(n.startswith("/dev/cu.") for n in nodes):
+        hits = [p for p in ioreg_rainy_ports() if p in nodes]
+        if hits:
+            return hits[0]
+    return None
+
+
 class Rainy75:
     """SMP serial client for the rgb_mgmt group."""
 
@@ -209,11 +286,10 @@ class Rainy75:
 
     @staticmethod
     def _find_port():
-        for pattern in ("/dev/cu.usbmodem*", "/dev/ttyACM*"):
-            hits = sorted(glob.glob(pattern))
-            if hits:
-                return hits[0]
-        raise RuntimeError("no serial port found (keyboard plugged in via USB?)")
+        port = find_port()
+        if port is None:
+            raise RuntimeError("no Rainy 75 found on USB (plugged in? or pass a port)")
+        return port
 
     def _open(self):
         self.fd = os.open(self.port, os.O_RDWR | os.O_NOCTTY)
